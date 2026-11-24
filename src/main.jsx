@@ -1,6 +1,9 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './ui/App.jsx'
-import './ui/styles.css'
+import styles from './ui/styles.css?inline'
 
+const stylesheet = document.createElement('style')
+stylesheet.textContent = styles
+document.head.append(stylesheet)
 createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>)

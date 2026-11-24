@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import { createGame } from '../game/createGame.js'
 import { loadSettings, TEAMS } from '../data/defaults.js'
 
 const blankScore = { score:0, wickets:0, balls:0, overs:'0.0', totalBalls:6, extras:0 }
@@ -16,26 +15,41 @@ export default function App() {
   const fieldStatusRef = useRef(null)
   const [screen,setScreen] = useState('home')
   const [gameReady, setGameReady] = useState(false)
+  const [fieldLoadFailed, setFieldLoadFailed] = useState(false)
   const [settings,setSettings] = useState(loadSettings)
   const [score,setScore] = useState(blankScore)
   const [best,setBest] = useState(Number(localStorage.getItem('boundary-bash-best') || 0))
   const [shotType,setShotType] = useState('drive')
 
   useEffect(() => {
-    const game = createGame(mountRef.current)
-    gameRef.current = game
-    function markGameReady() {
-      if (gameRef.current === game) setGameReady(true)
+    let cancelled = false
+    let game
+    async function loadField() {
+      try {
+        const { createGame } = await import('../game/createGame.js')
+        if (cancelled) return
+        game = createGame(mountRef.current)
+        gameRef.current = game
+        function markGameReady() {
+          if (cancelled) return
+          if (game.textures.exists('stadium') && game.textures.exists('match-ground')) setGameReady(true)
+          else setFieldLoadFailed(true)
+        }
+        function waitForStadium() {
+          const menu = game.scene.getScene('MenuScene')
+          if (menu.sys.isActive()) markGameReady()
+          else menu.sys.events.once('create', markGameReady)
+        }
+        if (game.scene.isBooted) waitForStadium()
+        else game.events.once('ready', waitForStadium)
+      } catch {
+        if (!cancelled) setFieldLoadFailed(true)
+      }
     }
-    function waitForStadium() {
-      const menu = game.scene.getScene('MenuScene')
-      if (menu?.sys.isActive()) markGameReady()
-      else menu?.sys.events.once('create', markGameReady)
-    }
-    if (game.scene.isBooted) waitForStadium()
-    else game.events.once('ready', waitForStadium)
+    loadField()
     return () => {
-      game.destroy(true)
+      cancelled = true
+      game?.destroy(true)
       gameRef.current = null
       matchRef.current = null
     }
@@ -153,7 +167,9 @@ export default function App() {
         <label>OVERS</label><div className="choice-row">{[1,2,5,10].map(n=><button key={n} onClick={()=>setSettings(s=>({...s,overs:n}))} className={settings.overs===n?'choice selected':'choice'}>{n}</button>)}</div>
         <label>OPPONENT</label><div className="choice-row">{['Easy','Medium','Hard'].map(d=><button key={d} onClick={()=>setSettings(s=>({...s,difficulty:d}))} className={settings.difficulty===d?'choice selected':'choice'}>{d}</button>)}</div>
         <label>YOUR TEAM</label><select value={settings.team} onChange={e=>setSettings(s=>({...s,team:e.target.value}))}>{TEAMS.map(t=><option key={t}>{t}</option>)}</select>
-        <button className="primary" onClick={startMatch} disabled={!gameReady}>{gameReady ? 'BAT FIRST' : 'LOADING FIELD…'} <b>→</b></button>
+        {fieldLoadFailed
+          ? <><p className="hint" role="alert">The field could not load. Check your connection and try again.</p><button className="primary" onClick={() => window.location.reload()}>RETRY</button></>
+          : <button className="primary" onClick={startMatch} disabled={!gameReady}>{gameReady ? 'BAT FIRST' : 'LOADING FIELD…'} <b>→</b></button>}
       </section>}
 
       {screen==='settings' && <section className="panel settings-panel">

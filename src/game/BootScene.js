@@ -1,10 +1,12 @@
 import Phaser from 'phaser'
+import stadiumUrl from './assets/cricket-stadium.webp'
+import matchGroundUrl from './assets/match-ground.webp'
 
 export default class BootScene extends Phaser.Scene {
   constructor() { super('BootScene') }
   preload() {
-    this.load.image('stadium', `${import.meta.env.BASE_URL}assets/cricket-stadium.png`)
-    this.load.image('match-ground', `${import.meta.env.BASE_URL}assets/match-ground.png`)
+    this.load.image('stadium', stadiumUrl)
+    this.load.image('match-ground', matchGroundUrl)
   }
   create() {
     const g = this.make.graphics({ x: 0, y: 0, add: false })

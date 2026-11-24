@@ -9,9 +9,9 @@ const SWING_TIME = 270
 const CONTACT_DELAY = SWING_TIME * 0.4
 const RUN_UP = 760
 const RELEASE = 250
-const RUN_TO_CREASE = 1000
-const GROUND_BAT = 200
-const TURN_FOR_NEXT_RUN = 175
+const RUN_TO_CREASE = 1350
+const GROUND_BAT = 230
+const TURN_FOR_NEXT_RUN = 240
 const RUN_LEG = RUN_TO_CREASE + GROUND_BAT + TURN_FOR_NEXT_RUN
 const DIVE_DURATION = 450
 const STRIKER = [0.526, 0.434]
@@ -483,7 +483,16 @@ export default class MatchScene extends Phaser.Scene {
     const boundary = attempt.runs >= 4
     let [destinationX, destinationY] = this.shotDestination(attempt, side)
     const interception = this.findInterception(attempt, fromX, fromY, destinationX, destinationY)
-    const intent = interception ? { ...attempt, runs: attempt.runs - 1 } : attempt
+    const intent = interception ? { ...attempt, runs: attempt.runs - 1 } : { ...attempt }
+    let runOut = false
+    if (interception && intent.runs >= 2) {
+      // A fielder cutting off the ball early makes a second run a real gamble.
+      const earlyGather = Phaser.Math.Clamp((0.76 - interception.fraction) / 0.28, 0, 1)
+      const risk = Phaser.Math.Clamp(0.2 + earlyGather * 0.22 + (intent.runs === 3 ? 0.28 : 0), 0, 0.72)
+      runOut = Math.random() < risk
+      if (runOut) intent.runs--
+    }
+    intent.runOut = runOut
     let fielder = interception?.fielder ?? this.closestFielder(destinationX, destinationY)
 
     if (intent.caught) {
@@ -529,8 +538,8 @@ export default class MatchScene extends Phaser.Scene {
       fieldGoalX, fieldGoalY, diveAt,
       flight, duration, running, intent, boundary, backingUp, throwTime,
       keeperX: this.keeper.x,
-      label: intent.caught ? 'OUT! CAUGHT' : boundary ? intent.runs === 6 ? 'SIX!' : 'FOUR!' : `${intent.runs} RUN${intent.runs === 1 ? '' : 'S'}`,
-      outcome: { runs: intent.runs, wicket: intent.caught },
+      label: intent.caught ? 'OUT! CAUGHT' : runOut ? 'OUT! RUN OUT' : boundary ? intent.runs === 6 ? 'SIX!' : 'FOUR!' : `${intent.runs} RUN${intent.runs === 1 ? '' : 'S'}`,
+      outcome: { runs: intent.runs, wicket: intent.caught || runOut },
     }
     this.startPlay(play, intent.grade)
   }
@@ -555,7 +564,7 @@ export default class MatchScene extends Phaser.Scene {
       const x = lerp(fromX, targetX, fraction)
       const y = lerp(fromY, targetY, fraction)
       const fielder = this.closestFielder(x, y)
-      if (Phaser.Math.Distance.Squared(fielder.x, fielder.y, x, y) <= reach ** 2) return { fielder, x, y }
+      if (Phaser.Math.Distance.Squared(fielder.x, fielder.y, x, y) <= reach ** 2) return { fielder, x, y, fraction }
     }
     return null
   }
@@ -677,7 +686,7 @@ export default class MatchScene extends Phaser.Scene {
     }
 
     const { fielder, fieldGoalX, fieldGoalY } = play
-    if (play.intent.caught) {
+    if (play.intent.caught || play.intent.runOut) {
       this.hideBall()
       this.place(fielder, fieldGoalX, fieldGoalY, 'appeal', progress(elapsed, 220), facing)
       return
@@ -802,7 +811,7 @@ export default class MatchScene extends Phaser.Scene {
     const { label, outcome } = play
     play.scored = true
     this.hideBall()
-    if (outcome.runs > 0 && outcome.runs < 4 && outcome.runs % 2 === 1) {
+    if (!outcome.wicket && outcome.runs > 0 && outcome.runs < 4 && outcome.runs % 2 === 1) {
       const previousStriker = this.batter
       this.batter = this.partner
       this.partner = previousStriker

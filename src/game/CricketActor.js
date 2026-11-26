@@ -6,7 +6,7 @@ const TAU = Math.PI * 2
 
 const KITS = {
   blue: { shirt: 0x1b4cb0, shadow: 0x11264e, highlight: 0x4a80dc, trim: 0x76c9fc },
-  green: { shirt: 0x176443, shadow: 0x0b3425, highlight: 0x57a46a, trim: 0xcbd558 },
+  fielding: { shirt: 0x237bc2, shadow: 0x123766, highlight: 0x59a4df, trim: 0xffac42 },
   red: { shirt: 0xc03843, shadow: 0x60242c, highlight: 0xe47578, trim: 0xf6e1ce },
   white: { shirt: 0xdddfe3, shadow: 0x868f9f, highlight: 0xf9f8ef, trim: 0x384653 }
 }
@@ -117,6 +117,16 @@ const SIGNAL = pose(
   [-10, -29, -9, -19], [10, -56, 10, -68],
   [-5, -12, -6, 0], [5, -12, 6, 0]
 )
+const WAVE_LEFT = pose(
+  [0, -25, 0, -44, 15, 0],
+  [-10, -29, -9, -19], [17, -43, 30, -44],
+  [-5, -12, -6, 0], [5, -12, 6, 0]
+)
+const WAVE_ACROSS = pose(
+  [0, -25, 0, -44, 15, 0],
+  [-10, -29, -9, -19], [7, -42, -10, -45],
+  [-5, -12, -6, 0], [5, -12, 6, 0]
+)
 const WINDUP = pose(
   [-1, -27, -3, -45, 15, -4],
   [-14, -54, -11, -65], [9, -36, 4, -30],
@@ -158,9 +168,14 @@ const THROW_RELEASE = pose(
   [-6, -12, -10, 0], [11, -12, 13, 0]
 )
 
-const POSES = ['idle', 'ready', 'run', 'bowl', 'swing', 'keeper', 'collect', 'throw', 'appeal', 'signal']
-const BATTER_POSES = [...POSES, 'ground', 'turn']
-const FIELDER_POSES = [...POSES, 'dive']
+const UMPIRE_POSES = ['idle', 'signal', 'four', 'six']
+const ACTOR_POSES = {
+  batter: ['idle', 'ready', 'run', 'swing', 'ground', 'turn'],
+  fielder: ['idle', 'ready', 'run', 'collect', 'throw', 'appeal', 'dive'],
+  bowler: ['idle', 'run', 'bowl'],
+  keeper: ['idle', 'ready', 'keeper', 'run', 'collect', 'appeal'],
+  umpire: UMPIRE_POSES,
+}
 const LOOPS = new Set(['idle', 'ready', 'run', 'keeper'])
 const BAT_STANCE_CYCLE = [[0, BAT_READY], [.22, BAT_BACKLIFT], [.48, BAT_TAP], [.66, BAT_TAP], [1, BAT_READY]]
 const BAT_GROUND_SEQUENCE = [[0, BAT_REACH], [.38, BAT_GROUNDED], [.64, BAT_GROUNDED], [1, BAT_GROUND_HOLD]]
@@ -245,6 +260,10 @@ function getPose(name, progress, role) {
       return blendPose(ready, COLLECT, Math.sin(progress * Math.PI / 2))
     case 'appeal':
       return blendPose(ready, APPEAL, Math.sin(progress * Math.PI))
+    case 'four':
+      return blendPose(WAVE_LEFT, WAVE_ACROSS, (1 - Math.cos(progress * TAU * 2)) / 2)
+    case 'six':
+      return blendPose(STANDING, APPEAL, Math.min(1, progress * 6, (1 - progress) * 6))
     case 'signal':
       return blendPose(STANDING, SIGNAL, Math.min(1, progress * 5, (1 - progress) * 5))
     default: {
@@ -420,7 +439,7 @@ function paintFrame(ctx, x, y, rig, kit, role, name) {
   const halfShoulderTilt = tilt * .5 + reach * 2
   const farShoulder = [sx - halfShoulderWidth, sy - halfShoulderTilt]
   const nearShoulder = [sx + halfShoulderWidth, sy + halfShoulderTilt]
-  const backView = role === 'bowler' || role === 'fielder'
+  const backView = role === 'batter' || role === 'keeper'
   const pads = role === 'batter' || role === 'keeper'
   const colors = [asHex(kit.shadow), asHex(kit.shirt), asHex(kit.highlight)]
   const trousers = role === 'umpire' ? DARK_FABRIC : colors
@@ -439,32 +458,50 @@ function paintFrame(ctx, x, y, rig, kit, role, name) {
   ctx.restore()
 }
 
-function makeAtlas(scene, role, kit, poses) {
-  const key = `cricket-actor-${role}-${kit.shirt}-${kit.shadow}-${kit.highlight}-${kit.trim}`
-  if (scene.textures.exists(key)) return key
-  const texture = scene.textures.createCanvas(key, FRAME_COUNT * FRAME_WIDTH, poses.length * FRAME_HEIGHT)
-  const context = texture.getContext()
-  // Bake the lighting and outlines once per uniform/role. During play each
-  // actor draws as a single sprite and changes only its frame and transform.
-  for (const [row, name] of poses.entries()) {
-    for (let frame = 0; frame < FRAME_COUNT; frame++) {
-      const x = frame * FRAME_WIDTH
-      const y = row * FRAME_HEIGHT
-      const phase = frame / (LOOPS.has(name) ? FRAME_COUNT : FRAME_COUNT - 1)
-      paintFrame(context, x, y, getPose(name, phase, role), kit, role, name)
-      texture.add(`${name}:${frame}`, 0, x, y, FRAME_WIDTH, FRAME_HEIGHT)
+const uniforms = [
+  ['batter', 'blue'], ['batter', 'red'], ['batter', 'white'],
+  ['bowler', 'fielding'], ['keeper', 'fielding'], ['fielder', 'fielding'], ['umpire', 'red'],
+]
+
+function* bakeFrames(textures) {
+  for (const [role, kit] of uniforms) {
+    const poses = ACTOR_POSES[role]
+    const texture = textures.createCanvas(role + '-' + kit, FRAME_COUNT * FRAME_WIDTH, poses.length * FRAME_HEIGHT)
+    const context = texture.getContext()
+    for (let row = 0; row < poses.length; row++) {
+      const name = poses[row]
+      for (let frame = 0; frame < FRAME_COUNT; frame++) {
+        const x = frame * FRAME_WIDTH
+        const y = row * FRAME_HEIGHT
+        const phase = frame / (LOOPS.has(name) ? FRAME_COUNT : FRAME_COUNT - 1)
+        paintFrame(context, x, y, getPose(name, phase, role), KITS[kit], role, name)
+        texture.addFrame(row * FRAME_COUNT + frame, x, y, FRAME_WIDTH, FRAME_HEIGHT)
+        yield
+      }
     }
   }
-  texture.refresh()
-  return key
+}
+
+export async function preloadActors(textures, onProgress, signal) {
+  const total = uniforms.reduce((n, [role]) => n + ACTOR_POSES[role].length * FRAME_COUNT, 0)
+  let painted = 0
+  let start = performance.now()
+  for (const _ of bakeFrames(textures)) {
+    painted++
+    if (performance.now() - start < 6) continue
+    onProgress(painted / total)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    signal.throwIfAborted()
+    start = performance.now()
+  }
+  onProgress(1)
 }
 
 export class CricketActor {
   constructor(scene, { x, y, scale = 1, kit = 'blue', role = 'batter', facing = 1 }) {
-    const colors = typeof kit === 'string' ? KITS[kit] || KITS.blue : { ...KITS.blue, ...kit }
-    this.poses = role === 'batter' ? BATTER_POSES : role === 'fielder' ? FIELDER_POSES : POSES
-    const texture = makeAtlas(scene, role, colors, this.poses)
-    this.sprite = scene.add.image(x, y, texture, 'idle:0')
+    this.poses = ACTOR_POSES[role]
+    const texture = role + '-' + kit
+    this.sprite = scene.add.image(x, y, texture, 0)
       .setOrigin(.5, GROUND_Y / FRAME_HEIGHT)
       .setScale(scale)
     this.setPosition(x, y).setPose('idle', 0, facing)
@@ -489,14 +526,14 @@ export class CricketActor {
   }
 
   setPose(name, phase = 0, facing = this.facing) {
-    if (!this.poses.includes(name)) name = 'idle'
+    const row = Math.max(0, this.poses.indexOf(name))
     const frame = LOOPS.has(name)
       ? Math.floor((phase - Math.floor(phase)) * FRAME_COUNT)
       : Math.round(Math.max(0, Math.min(1, phase)) * (FRAME_COUNT - 1))
-    const frameName = `${name}:${frame}`
-    if (this.frameName !== frameName) {
-      this.sprite.setFrame(frameName)
-      this.frameName = frameName
+    const frameId = row * FRAME_COUNT + frame
+    if (this.frameId !== frameId) {
+      this.sprite.setFrame(frameId)
+      this.frameId = frameId
     }
     this.facing = facing < 0 ? -1 : 1
     this.sprite.setFlipX(this.facing < 0)

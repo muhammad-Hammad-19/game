@@ -1,25 +1,14 @@
 export const BOUNDARY_CENTER_Y = 0.584
 const BOUNDARY_DEPTH = 0.253
 
-// The near side is wider to match the pitch's perspective in the stadium art.
-function alongRope(angle, inset = 0) {
-  const radians = angle * Math.PI / 180
-  const depth = Math.sin(radians)
-  const width = 0.423 + 0.05 * depth
-  return [
-    0.5 + Math.cos(radians) * (width - inset),
-    BOUNDARY_CENTER_Y + depth * (BOUNDARY_DEPTH - inset),
-  ]
+// Normalized screen coordinates on the original stadium photograph.
+export function ropeY(x) {
+  return 0.355 - 0.056 * (x - 0.5) ** 2
 }
 
-export const BOUNDARY_ROPE = Array.from({ length: 72 }, (_, index) => alongRope(index * 5))
-
-const BOUNDARY_ANGLES = { leg: 172, off: 8, straight: 78 }
-
 export function boundaryPoint(direction) {
-  // The projection is behind the bowler, so a straight drive travels toward
-  // the near boundary. Positive x is the off side in the batting controls.
-  return alongRope(BOUNDARY_ANGLES[direction] ?? BOUNDARY_ANGLES.straight)
+  const x = { leg: 0.09, off: 0.91, straight: 0.54 }[direction] ?? 0.54
+  return [x, ropeY(x)]
 }
 
 export function toRadarPoint(x, y) {
@@ -30,13 +19,21 @@ export function toRadarPoint(x, y) {
   return [50 + 45 * lateral / radius, 50 + 45 * depth / radius]
 }
 
-const deep = angle => alongRope(angle, 0.014)
+function deep(angle) {
+  return { angle }
+}
 
 function plan(id, label, spots) {
   return {
     id,
     label,
-    positions: spots.map(([, point]) => point),
+    // The original plans face the opposite end. Reflect close positions
+    // around mid-pitch and leave the deep positions along the far rope.
+    positions: spots.map(([, spot]) => {
+      if (Array.isArray(spot)) return [spot[0], 2 * BOUNDARY_CENTER_Y - spot[1]]
+      const x = 0.5 + 0.445 * Math.cos(spot.angle * Math.PI / 180)
+      return [x, ropeY(x) + 0.018]
+    }),
     names: spots.map(([name]) => name),
   }
 }

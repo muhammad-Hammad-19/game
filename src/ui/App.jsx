@@ -1,223 +1,227 @@
 import { useEffect, useRef, useState } from 'react'
 import { loadSettings, TEAMS } from '../data/defaults.js'
+import { unlockAudio } from '../game/sounds.js'
+import MatchHud from './MatchHud.jsx'
 
-const blankScore = { score:0, wickets:0, balls:0, overs:'0.0', totalBalls:6, extras:0 }
-const fieldDotIndices = Array.from({ length: 9 }, (_, index) => index)
+const initialScore = { score: 0, wickets: 0, balls: 0, overs: '0.0', totalBalls: 6, extras: 0 }
+const portraitQuery = '(orientation: portrait)'
+
+function buzz() {
+  navigator.vibrate?.(12)
+}
+
+function readBest() {
+  try { return Number(localStorage.getItem('boundary-bash-best')) || 0 }
+  catch { return 0 }
+}
+
+function save(key, value) {
+  try { localStorage.setItem(key, value) } catch { /* Storage can be unavailable in private mode. */ }
+}
+
+async function enterLandscape() {
+  try { await document.documentElement.requestFullscreen?.({ navigationUI: 'hide' }) } catch {}
+  try { await window.screen.orientation?.lock?.('landscape') } catch {}
+}
+
+function Brand() {
+  return <div className="brand"><i className="brand-crest" aria-hidden="true"><i /></i><span>BOUNDARY BASH <small>CRICKET</small></span></div>
+}
+
+function Choices({ label, values, selected, onChoose }) {
+  return <fieldset className="choices"><legend>{label}</legend><div>
+    {values.map(value => <button key={value} type="button" aria-pressed={selected === value} onClick={() => onChoose(value)}>{value}</button>)}
+  </div></fieldset>
+}
 
 export default function App() {
-  const mountRef = useRef(null)
-  const gameRef = useRef(null)
-  const matchRef = useRef(null)
-  const timingRef = useRef(null)
-  const fieldRadarRef = useRef(null)
-  const fieldBallRef = useRef(null)
-  const fieldLabelRef = useRef(null)
-  const fieldStatusRef = useRef(null)
-  const [screen,setScreen] = useState('home')
-  const [gameReady, setGameReady] = useState(false)
-  const [fieldLoadFailed, setFieldLoadFailed] = useState(false)
-  const [settings,setSettings] = useState(loadSettings)
-  const [score,setScore] = useState(blankScore)
-  const [best,setBest] = useState(Number(localStorage.getItem('boundary-bash-best') || 0))
-  const [shotType,setShotType] = useState('drive')
+  const mount = useRef(null)
+  const hud = useRef(null)
+  const game = useRef(null)
+  const match = useRef(null)
+  const manualPause = useRef(false)
+  const [portrait, setPortrait] = useState(() => window.matchMedia(portraitQuery).matches)
+  const [screen, setScreen] = useState('home')
+  const [ready, setReady] = useState(false)
+  const [failed, setFailed] = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [settings, setSettings] = useState(loadSettings)
+  const [score, setScore] = useState(initialScore)
+  const [best, setBest] = useState(readBest)
+  const [shot, setShot] = useState('drive')
+  const inMatch = screen === 'match' || screen === 'pause'
 
   useEffect(() => {
-    let cancelled = false
-    let game
-    async function loadField() {
+    let disposed = false
+    let runtime
+    async function load() {
       try {
         const { createGame } = await import('../game/createGame.js')
-        if (cancelled) return
-        game = createGame(mountRef.current)
-        gameRef.current = game
-        function markGameReady() {
-          if (cancelled) return
-          if (game.textures.exists('stadium') && game.textures.exists('match-ground')) setGameReady(true)
-          else setFieldLoadFailed(true)
-        }
-        function waitForStadium() {
-          const menu = game.scene.getScene('MenuScene')
-          if (menu.sys.isActive()) markGameReady()
-          else menu.sys.events.once('create', markGameReady)
-        }
-        if (game.scene.isBooted) waitForStadium()
-        else game.events.once('ready', waitForStadium)
+        if (disposed) return
+        runtime = createGame(mount.current, { onProgress: value => {
+          if (!disposed) setProgress(Math.round(value * 100))
+        } })
+        game.current = runtime
+        await runtime.ready
+        if (!disposed) setReady(true)
       } catch {
-        if (!cancelled) setFieldLoadFailed(true)
+        if (!disposed) setFailed(true)
       }
     }
-    loadField()
+    load()
     return () => {
-      cancelled = true
-      game?.destroy(true)
-      gameRef.current = null
-      matchRef.current = null
+      disposed = true
+      runtime?.destroy()
+      game.current = null
+      match.current = null
     }
-  },[])
+  }, [])
 
-  useEffect(() => { localStorage.setItem('boundary-bash-settings',JSON.stringify(settings)) },[settings])
+  useEffect(() => {
+    const orientation = window.matchMedia(portraitQuery)
+    function sync() {
+      const paused = manualPause.current || orientation.matches || document.hidden
+      match.current?.setPaused(paused)
+      setPortrait(orientation.matches)
+    }
+    function firstTap() {
+      unlockAudio()
+      enterLandscape()
+    }
+    function onKey(event) {
+      if (!event.isComposing) unlockAudio()
+    }
+    orientation.addEventListener('change', sync)
+    document.addEventListener('visibilitychange', sync)
+    document.addEventListener('pointerup', firstTap, { once: true, capture: true })
+    document.addEventListener('keydown', onKey, { once: true, capture: true })
+    return () => {
+      orientation.removeEventListener('change', sync)
+      document.removeEventListener('visibilitychange', sync)
+      document.removeEventListener('pointerup', firstTap, true)
+      document.removeEventListener('keydown', onKey, true)
+    }
+  }, [])
+
+  useEffect(() => { save('boundary-bash-settings', JSON.stringify(settings)) }, [settings])
 
   function startMatch() {
-    const game = gameRef.current
-    if (!gameReady || !game) return
-    timingRef.current.dataset.phase = 'ready'
-    delete timingRef.current.dataset.grade
-    timingRef.current.style.setProperty('--timing', '0%')
-    const fieldDisplay = {
-      dots: Array.from(fieldRadarRef.current.querySelectorAll('[data-field-dot]')),
-      ball: fieldBallRef.current,
-      label: fieldLabelRef.current,
-      status: fieldStatusRef.current,
-    }
-    fieldDisplay.label.textContent = ''
-    fieldDisplay.status.dataset.active = 'false'
-    fieldDisplay.status.textContent = ''
-    fieldDisplay.ball.removeAttribute('style')
-    fieldDisplay.dots.forEach(dot => {
-      dot.removeAttribute('style')
-      dot.removeAttribute('title')
-    })
-    setScore({...blankScore,totalBalls:settings.overs*6}); setShotType('drive'); setScreen('game')
-    if (game.scene.isActive('MenuScene')) game.scene.stop('MenuScene')
-    if (game.scene.isActive('MatchScene')) game.scene.stop('MatchScene')
-    game.scene.start('MatchScene', {
+    if (!ready || portrait || document.hidden) return
+    buzz()
+    manualPause.current = false
+    const root = hud.current
+    const dots = Array.from(root.querySelectorAll('[data-field-dot]'))
+    const ball = root.querySelector('.radar-ball')
+    const timingElement = root.querySelector('.timing-marker')
+    for (const dot of [...dots, ball]) dot.removeAttribute('style')
+    timingElement.removeAttribute('style')
+    delete timingElement.dataset.grade
+    setShot('drive')
+    setScreen('match')
+    match.current = game.current.startMatch({
       settings: { ...settings },
-      timingElement: timingRef.current,
-      fieldDisplay,
-      onUpdate: update => {
+      timingElement,
+      fieldDisplay: { dots, ball, label: root.querySelector('.radar-formation'), status: root.querySelector('.radar-status') },
+      onUpdate(update) {
         setScore(update)
         if (update.finished) {
           const nextBest = Math.max(best, update.score)
           setBest(nextBest)
-          localStorage.setItem('boundary-bash-best', String(nextBest))
+          save('boundary-bash-best', String(nextBest))
           setScreen('result')
+          match.current = null
         }
-      },
+      }
     })
-    matchRef.current=game.scene.getScene('MatchScene')
   }
 
-  function returnHome() {
-    const game=gameRef.current
-    game?.scene.stop('MatchScene')
-    matchRef.current = null
-    if (game && !game.scene.isActive('MenuScene')) game.scene.start('MenuScene')
+  function home() {
+    match.current = null
+    manualPause.current = false
+    game.current?.showMenu()
     setScreen('home')
   }
-  function pause() {
-    if (!matchRef.current) return
-    const paused = screen === 'game'
-    matchRef.current.setPaused(paused)
-    setScreen(paused ? 'pause' : 'game')
+  function togglePause() {
+    if (!match.current || portrait || document.hidden) return
+    buzz()
+    manualPause.current = !manualPause.current
+    match.current.setPaused(manualPause.current)
+    setScreen(manualPause.current ? 'pause' : 'match')
   }
-
-  function swing() {
-    matchRef.current?.swing('straight', shotType === 'loft')
+  function chooseShot(value) {
+    if (!match.current) return
+    match.current.selectedShot = value
+    setShot(value)
   }
+  function setOption(name, value) { setSettings(previous => ({ ...previous, [name]: value })) }
 
-  function chooseShot(type) {
-    if (matchRef.current) matchRef.current.selectedShot = type
-    setShotType(type)
-  }
+  const runRate = score.balls ? (score.score * 6 / score.balls).toFixed(1) : '0.0'
 
-  const inMatch = screen === 'game' || screen === 'pause'
-  const paused = screen === 'pause'
-  const runRate=score.balls ? (score.score/(score.balls/6)).toFixed(1) : '0.0'
-  const oversLeft=Math.max(0,score.totalBalls-score.balls)
+  return <main className="app-shell">
+    <div className={inMatch ? 'game-frame playing' : 'game-frame'} inert={portrait ? '' : undefined}>
+      <div ref={mount} className="canvas-mount" aria-label="Cricket ground" />
+      {!inMatch && <div className="menu-shade" />}
+      {!inMatch && <header className="menu-header"><Brand />
+        {screen === 'home' ? <button className="header-action" onClick={() => setScreen('settings')}><span className="gear" aria-hidden="true">⚙</span>Settings</button>
+          : <button className="header-action" onClick={home}>Main menu</button>}
+      </header>}
 
-  return <main className={inMatch ? 'app-shell is-playing' : 'app-shell'}>
-    <div className={inMatch ? 'game-frame is-match' : 'game-frame'}>
-      <div ref={mountRef} className="phaser-mount" aria-label="Cricket game canvas" />
-      {!inMatch && <div className="shade" />}
-
-      <header className="match-topline" hidden={!inMatch}>
-        <div className="brand-mark"><span className="brand-ball" aria-hidden="true">●</span><span>BOUNDARY <b>BASH</b></span></div>
-        <div className="timing-panel" role="img" aria-label="Shot timing. Swing when the pointer reaches the center.">
-          <span>SHOT TIMING</span>
-          <div className="timing-track">
-            <i ref={timingRef} className="timing-marker" data-phase="ready" />
-          </div>
-          <small>EARLY <strong>PERFECT</strong> LATE</small>
-        </div>
-        <button className="pause-button" onClick={pause} aria-label="Pause game" disabled={paused}>Ⅱ</button>
-      </header>
-
-      <aside ref={fieldRadarRef} className="field-radar" aria-label="Bowling field" hidden={!inMatch}>
-        <div className="radar-ground" aria-hidden="true">
-          {fieldDotIndices.map(index => <i key={index} className="radar-dot" data-field-dot="" />)}
-          <i ref={fieldBallRef} className="radar-dot radar-ball" />
-        </div>
-        <div className="radar-caption">
-          <span className="radar-label">Field</span>
-          <strong ref={fieldLabelRef} className="radar-formation" />
-        </div>
-        <p ref={fieldStatusRef} className="radar-status" role="status" aria-atomic="true" />
-      </aside>
-
-      {screen==='home' && <section className="panel home-panel">
-        <p className="eyebrow">A pocket sized cricket showdown</p><h1>BOUNDARY<br/><span>BASH</span></h1>
-        <p className="tagline">One over. One big innings.</p>
-        <button className="primary font-extrabold" onClick={()=>setScreen('setup')}>PLAY MATCH <b>→</b></button>
-        <button className="text-button" onClick={()=>setScreen('settings')}>⚙ Settings</button>
-        <div className="best-pill">BEST INNINGS <strong>{best}</strong></div>
+      {screen === 'home' && <section className="home-body">
+        <h1>Boundary<br/><span>Bash</span><i className="title-stripes" aria-hidden="true" /></h1>
+        <p>Bat for the {settings.team} in a {settings.overs}-over match.</p>
+        <button className="primary play-match" onClick={() => setScreen('setup')}><i className="play-icon" aria-hidden="true"/>Play match</button>
       </section>}
 
-      {screen==='setup' && <section className="panel setup-panel">
-        <button className="back" onClick={returnHome}>← Menu</button><p className="eyebrow">Quick match</p><h2>Set the scene</h2>
-        <label>OVERS</label><div className="choice-row">{[1,2,5,10].map(n=><button key={n} onClick={()=>setSettings(s=>({...s,overs:n}))} className={settings.overs===n?'choice selected':'choice'}>{n}</button>)}</div>
-        <label>OPPONENT</label><div className="choice-row">{['Easy','Medium','Hard'].map(d=><button key={d} onClick={()=>setSettings(s=>({...s,difficulty:d}))} className={settings.difficulty===d?'choice selected':'choice'}>{d}</button>)}</div>
-        <label>YOUR TEAM</label><select value={settings.team} onChange={e=>setSettings(s=>({...s,team:e.target.value}))}>{TEAMS.map(t=><option key={t}>{t}</option>)}</select>
-        {fieldLoadFailed
-          ? <><p className="hint" role="alert">The field could not load. Check your connection and try again.</p><button className="primary" onClick={() => window.location.reload()}>RETRY</button></>
-          : <button className="primary" onClick={startMatch} disabled={!gameReady}>{gameReady ? 'BAT FIRST' : 'LOADING FIELD…'} <b>→</b></button>}
-      </section>}
+      {screen === 'home' && <footer className="club-footer">
+        <div><span>Best innings</span><b>{best} <small>runs</small></b></div>
+        <div><span>Opponent</span><b>{settings.difficulty}</b></div>
+      </footer>}
 
-      {screen==='settings' && <section className="panel settings-panel">
-        <button className="back" onClick={returnHome}>← Menu</button><p className="eyebrow">Your preferences</p><h2>Settings</h2>
-        <button className="setting-row" onClick={()=>setSettings(s=>({...s,sound:!s.sound}))}><span>Sound effects</span><b>{settings.sound?'ON':'OFF'}</b></button>
-        <p className="hint">Tip: turn your phone sideways for a wider view.</p>
-        <button className="primary" onClick={returnHome}>DONE</button>
-      </section>}
-
-      {inMatch && <>
-        <div className="match-tip text-center">SWIPE THE FIELD TO AIM</div>
-        <div className="bat-controls" aria-label="Batting controls">
-          <div className="foot-controls">
-            <button onClick={() => matchRef.current?.setFootwork('back')} disabled={paused}>BACK FOOT</button>
-            <button onClick={() => matchRef.current?.setFootwork('advance')} disabled={paused}>ADVANCE</button>
-            <button onClick={() => matchRef.current?.leave()} disabled={paused}>LEAVE</button>
-          </div>
-          <div className="shot-controls">
-            <button aria-pressed={shotType === 'drive'} onClick={() => chooseShot('drive')} disabled={paused}>DRIVE</button>
-            <button className="loft" aria-pressed={shotType === 'loft'} onClick={() => chooseShot('loft')} disabled={paused}>LOFT</button>
-            <button
-              className="shot-hit"
-              onPointerDown={event => {
-                if (event.isPrimary && event.button === 0) swing()
-              }}
-              onClick={event => { if (event.detail === 0) swing() }}
-              aria-label="Hit the ball"
-              disabled={paused}
-            >HIT</button>
-          </div>
+      {screen === 'setup' && <section className="menu-card setup">
+        <h2>Match setup</h2>
+        <div className="setup-grid">
+          <Choices label="Overs" values={[1, 2, 5, 10]} selected={settings.overs} onChoose={value => setOption('overs', value)}/>
+          <Choices label="Opponent" values={['Easy', 'Medium', 'Hard']} selected={settings.difficulty} onChoose={value => setOption('difficulty', value)}/>
+          <label className="team-field">Your team<select value={settings.team} onChange={event => setOption('team', event.target.value)}>
+            {TEAMS.map(team => <option key={team}>{team}</option>)}
+          </select></label>
+          {failed ? <button className="primary" onClick={() => window.location.reload()}>Retry loading</button>
+            : <button className="primary" onClick={startMatch} disabled={!ready}>{ready ? 'Bat first' : 'Loading field…'}</button>}
         </div>
-        <footer className="score-strip">
-          <div className="innings-score"><span>{settings.team.toUpperCase()}</span><strong>{score.score}<i> / {score.wickets}</i></strong></div>
-          <div><span>OVERS</span><b>{score.overs}<small> / {settings.overs}.0</small></b></div>
-          <div><span>RUN RATE</span><b>{runRate}</b></div>
-          <div className="player-stat"><span>STRIKER</span><b>YOU <i>{score.score} ({score.balls})</i></b></div>
-          <div className="player-stat"><span>BOWLER</span><b>PACE <i>{score.balls} balls</i></b></div>
-          <div><span>EXTRAS</span><b>{score.extras}</b></div>
-        </footer>
-        <p className="orientation-hint">Rotate your phone for a wider view.</p>
-      </>}
+        {failed && <p className="hint" role="alert">The field could not load. Check your connection and retry.</p>}
+      </section>}
 
-      {paused && <>
-        <div className="pause-shade" />
-        <section className="panel modal" role="dialog" aria-modal="true" aria-labelledby="pause-title"><h2 id="pause-title">Match paused</h2><button className="primary" onClick={pause} autoFocus>RESUME</button><button className="text-button" onClick={returnHome}>End innings</button></section>
-      </>}
+      {!ready && !failed && <div className="loading" role="status"><span>Preparing the field</span><b>{progress}%</b>
+        <progress max="100" value={progress} aria-label="Loading field and players"/></div>}
 
-      {screen==='result' && <section className="panel result-panel"><p className="eyebrow">Innings complete</p><h2>{score.score>=20?'BIG HITTER!':'NICE INNINGS!'}</h2><div className="result-score">{score.score}<span> / {score.wickets}</span></div><div className="result-grid"><div><span>OVERS</span><b>{score.overs}</b></div><div><span>RUN RATE</span><b>{runRate}</b></div><div><span>EXTRAS</span><b>{score.extras}</b></div></div><p className="hint">{oversLeft===0?'You faced your full allocation.':'All wickets are down.'} Best: {best} runs.</p><button className="primary" onClick={startMatch}>PLAY AGAIN <b>↻</b></button><button className="text-button" onClick={returnHome}>Main menu</button></section>}
+      {screen === 'settings' && <section className="menu-card settings">
+        <h2>Settings</h2>
+        <button className="setting-row" aria-pressed={settings.sound} onClick={() => setOption('sound', !settings.sound)}>
+          Sound effects <b>{settings.sound ? 'On' : 'Off'}</b>
+        </button>
+        <button className="setting-row" onClick={()=>setOption('pitchHint',settings.pitchHint===false)}>Pitch map hint <b>{settings.pitchHint===false?'Off':'On'}</b></button>
+        <Choices label="Pitch" values={['green','dusty','flat']} selected={settings.pitchType || 'flat'} onChoose={value=>setOption('pitchType',value)}/>
+        <p className="hint">Swipe left or right to direct a shot. Tap the pitch to play straight. On a keyboard, use ←, → or Space.</p>
+        <button className="primary" onClick={home}>Done</button>
+      </section>}
+
+      <MatchHud root={hud} match={match} visible={inMatch} active={screen === 'match' && !portrait}
+        team={settings.team} difficulty={settings.difficulty} overs={settings.overs} score={score} runRate={runRate}
+        shot={shot} chooseShot={chooseShot} pause={togglePause} />
+
+      {screen === 'pause' && <div className="modal-backdrop"><section className="menu-card modal" role="dialog" aria-modal="true" aria-labelledby="pause-title">
+        <h2 id="pause-title">Match paused</h2>
+        <button className="primary" onClick={togglePause} autoFocus>Resume</button>
+        <button className="secondary" onClick={home}>End innings</button>
+      </section></div>}
+
+      {screen === 'result' && <section className="menu-card results">
+        <div><p className="kicker">Innings complete</p><h2>{settings.team}</h2><p className="final-score">{score.score}<small> / {score.wickets}</small></p></div>
+        <div><dl>{[['Overs', score.overs], ['Run rate', runRate], ['Extras', score.extras], ['Best innings', best]].map(([label, value]) =>
+          <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
+          <button className="primary" onClick={startMatch}>Play again</button></div>
+      </section>}
     </div>
+    <section className="rotate-overlay" role="status" aria-hidden={!portrait}><div className="rotating-phone" aria-hidden="true"/><h2>Phone ko rotate karo</h2><p>Landscape mein kheliye.</p></section>
   </main>
 }

@@ -1,6 +1,7 @@
-import Phaser from 'phaser'
+import { makeRope } from './groundMarkings.js'
+import { playSound } from './sounds.js'
 import { CricketActor } from './CricketActor.js'
-import { BOUNDARY_CENTER_Y, BOUNDARY_ROPE, FIELD_PLANS, boundaryPoint, selectFieldPlan, toRadarPoint } from './fieldPlans.js'
+import { BOUNDARY_CENTER_Y, ropeY, FIELD_PLANS, boundaryPoint, selectFieldPlan, toRadarPoint } from './fieldPlans.js'
 
 const PERFECT_WINDOW = { Easy: 0.17, Medium: 0.12, Hard: 0.075 }
 const INTERCEPTION_REACH = { Easy: 26, Medium: 37, Hard: 48 }
@@ -14,23 +15,26 @@ const GROUND_BAT = 230
 const TURN_FOR_NEXT_RUN = 240
 const RUN_LEG = RUN_TO_CREASE + GROUND_BAT + TURN_FOR_NEXT_RUN
 const DIVE_DURATION = 450
-const STRIKER = [0.526, 0.434]
-const NON_STRIKER = [0.589, 0.728]
-const FAR_GROUND = [0.526, 0.420]
-const NEAR_GROUND = [0.589, 0.740]
-const KEEPER = [0.498, 0.382]
-const BOWLER_START = [0.388, 0.809]
-const BOWLER_CREASE = [0.449, 0.714]
-const progress = (elapsed, duration) => Phaser.Math.Clamp(elapsed / duration, 0, 1)
-const lerp = Phaser.Math.Linear
+const STRIKER = [0.516, 0.738]
+const NON_STRIKER = [0.564, 0.432]
+const STRIKER_GROUND = [0.516, 0.758]
+const PARTNER_GROUND = [0.564, 0.417]
+const KEEPER = [0.477, 0.87]
+const BOWLER_START = [0.448, 0.382]
+const BOWLER_CREASE = [0.482, 0.425]
+const BATTING_ORDER = ['A. Malik', 'T. Silva', 'J. Reed', 'R. Khan', 'M. Ali', 'D. Cole', 'S. Roy', 'K. Fox', 'I. Noor', 'L. Bell', 'N. Shah']
+const BOWLERS = ['Z. Mir', 'O. Blake']
+const clamp = (n, min, max) => Math.max(min, Math.min(n, max))
+const progress = (elapsed, duration) => clamp(elapsed / duration, 0, 1)
+const lerp = (a, b, t) => a + (b - a) * t
+const randomInt = (min, max) => min + Math.floor(Math.random() * (max - min + 1))
+const randomFloat = (min, max) => lerp(min, max, Math.random())
+const squaredDistance = (ax, ay, bx, by) => (ax - bx) ** 2 + (ay - by) ** 2
+const distanceBetween = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by)
 const smooth = t => t * t * (3 - 2 * t)
 const cycle = (elapsed, period) => (elapsed % period) / period
 
-export default class MatchScene extends Phaser.Scene {
-  constructor() {
-    super('MatchScene')
-  }
-
+export default class MatchScene {
   init(data) {
     this.onUpdate = data.onUpdate || (() => {})
     this.timingElement = data.timingElement
@@ -46,7 +50,10 @@ export default class MatchScene extends Phaser.Scene {
     this.finished = false
     this.selectedShot = 'drive'
     this.footwork = null
-    this.pointerStart = null
+    this.lastLabel = ''
+    this.lastWicket = false
+    this.zoom = 1
+    this.radarPoint = [0, 0]
     this.delivery = null
     this.play = null
     this.fieldPlan = FIELD_PLANS.balanced
@@ -59,8 +66,19 @@ export default class MatchScene extends Phaser.Scene {
   create() {
     this.w = this.scale.width
     this.h = this.scale.height
-    this.add.image(this.w / 2, this.h / 2, 'match-ground').setDisplaySize(this.w, this.h)
-    this.drawBoundaryRope()
+    makeRope(this.textures)
+    const layer = key => this.add.image(this.w / 2, this.h / 2, key).setDisplaySize(this.w, this.h)
+    layer('match-ground')
+    layer('boundary-rope').setDepth(1)
+    this.flash=layer('rope-flash').setDepth(2).setVisible(false)
+    this.bounceMarker=this.add.ellipse(0,0,9,4,0xffcf59,.75).setDepth(5).setVisible(false)
+    this.wheel = []
+
+    this.bowlerStart = this.toScreen(BOWLER_START)
+    this.bowlerCrease = this.toScreen(BOWLER_CREASE)
+    this.keeperSpot = this.toScreen(KEEPER)
+    this.strikerSpot = this.toScreen(STRIKER)
+    this.partnerSpot = this.toScreen(NON_STRIKER)
     this.createPlayers()
     this.applyFieldPlan(this.fieldPlan, false)
 
@@ -68,39 +86,16 @@ export default class MatchScene extends Phaser.Scene {
     this.ball = this.add.image(0, 0, 'cricket-ball').setVisible(false).setDepth(30)
     this.trail = this.add.particles(0, 0, 'cricket-ball', {
       speed: 0,
-      scale: { start: 0.23, end: 0 },
-      alpha: { start: 0.36, end: 0 },
+      scale: { start: 0.31, end: 0 },
+      alpha: { start: 0.6, end: 0 },
       lifespan: 150,
       frequency: 24,
       emitting: false,
     }).setDepth(29)
     this.trail.startFollow(this.ball)
-    this.popup = this.add.text(this.w / 2, this.h * 0.23, '', {
-      fontFamily: 'Arial Black, sans-serif',
-      fontSize: '38px',
-      color: '#ffe37b',
-      stroke: '#10251f',
-      strokeThickness: 7,
-    }).setOrigin(0.5).setDepth(40).setAlpha(0)
-
-    this.input.on('pointerdown', this.onPointerDown, this)
-    this.input.on('pointerup', this.onPointerUp, this)
-    this.input.on('pointerupoutside', this.clearPointer, this)
-    this.input.keyboard?.on('keydown', this.onKeyDown, this)
-    this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.onShutdown, this)
     this.onUpdate(this.snapshot())
     this.beginReady(850)
     this.updateFieldRadar()
-  }
-
-  drawBoundaryRope() {
-    const rope = this.add.graphics().setDepth(1)
-    const points = BOUNDARY_ROPE.map(point => {
-      const [x, y] = this.toScreen(point)
-      return { x, y }
-    })
-    rope.lineStyle(4, 0x243e2f, 0.55).strokePoints(points.map(({ x, y }) => ({ x, y: y + 1.5 })), true)
-    rope.lineStyle(2.2, 0xfff8de, 0.88).strokePoints(points, true)
   }
 
   createPlayers() {
@@ -112,11 +107,13 @@ export default class MatchScene extends Phaser.Scene {
 
     this.batter = createActor('batter', STRIKER, battingKit, -1)
     this.partner = createActor('batter', NON_STRIKER, battingKit, -1)
-    this.bowler = createActor('bowler', BOWLER_START, 'green')
-    this.keeper = createActor('keeper', KEEPER, 'green')
-    this.umpire = createActor('umpire', [0.484, 0.807], 'red')
+    this.batter.playerName = BATTING_ORDER[0]
+    this.partner.playerName = BATTING_ORDER[1]
+    this.bowler = createActor('bowler', BOWLER_START, 'fielding')
+    this.keeper = createActor('keeper', KEEPER, 'fielding')
+    this.umpire = createActor('umpire', [0.52, 0.391], 'red')
     this.fielders = this.fieldPlan.positions.map(point =>
-      createActor('fielder', point, 'green', point[0] < 0.5 ? 1 : -1),
+      createActor('fielder', point, 'fielding', point[0] < 0.5 ? 1 : -1),
     )
   }
 
@@ -129,6 +126,7 @@ export default class MatchScene extends Phaser.Scene {
   }
 
   place(actor, x, y, pose, phase, facing = actor.facing) {
+    if (this.fielders.includes(actor)) y = Math.max(y, ropeY(x / this.w) * this.h + 3)
     actor.setPosition(x, y).setScale(this.playerScale(y)).setPose(pose, phase, facing)
   }
 
@@ -166,7 +164,7 @@ export default class MatchScene extends Phaser.Scene {
   updateFieldRadar() {
     if (!this.fieldDisplay || this.elapsed < this.nextRadarUpdate) return
     this.nextRadarUpdate = this.elapsed + 42
-    this.fieldDisplay.dots.forEach((dot, index) => this.updateRadarMarker(dot, this.fielders[index]))
+    for (let i = 0; i < this.fielders.length; i++) this.updateRadarMarker(this.fieldDisplay.dots[i], this.fielders[i])
 
     const ballDot = this.fieldDisplay.ball
     if (!ballDot) return
@@ -178,14 +176,14 @@ export default class MatchScene extends Phaser.Scene {
   }
 
   updateRadarMarker(dot, object) {
-    const [mapX, mapY] = toRadarPoint(object.x / this.w, object.y / this.h)
+    const [mapX, mapY] = toRadarPoint(object.x / this.w, object.y / this.h, this.radarPoint)
     const x = Math.round(mapX)
     const y = Math.round(mapY)
-    const previous = this.radarPositions.get(dot)
-    if (previous?.x === x && previous.y === y) return
+    const position = x * 101 + y
+    if (this.radarPositions.get(dot) === position) return
     dot.style.setProperty('--field-x', `${x}%`)
     dot.style.setProperty('--field-y', `${y}%`)
-    this.radarPositions.set(dot, { x, y })
+    this.radarPositions.set(dot, position)
   }
 
   beginReady(delay) {
@@ -199,7 +197,7 @@ export default class MatchScene extends Phaser.Scene {
       wickets: this.wickets,
       difficulty: this.settings.difficulty,
     })
-    if (nextPlan !== this.fieldPlan) this.applyFieldPlan(nextPlan, true)
+    if (nextPlan !== this.fieldPlan || this.balls===6*Math.max(1,Math.round(this.settings.overs*.3))) this.applyFieldPlan(nextPlan, true)
     this.setStage('ready')
     this.nextDeliveryAt = this.elapsed + delay
   }
@@ -208,18 +206,20 @@ export default class MatchScene extends Phaser.Scene {
     this.play = null
     this.delivery = {
       startedAt: this.elapsed,
-      pace: Phaser.Math.Between(720, 1030),
-      line: Phaser.Math.FloatBetween(-16, 16),
-      bounceAt: Phaser.Math.FloatBetween(0.54, 0.76),
+      pace: randomInt(720, 1030),
+      line: randomFloat(-16, 16),
+      bounceAt: randomFloat(0.54, 0.76),
       intent: null,
     }
     this.setStage('runup')
-    this.clearPointer()
   }
 
   update(_time, delta) {
     if (this.paused || (this.finished && this.play?.reportAt === null)) return
-    this.frameDelta = Math.min(delta, 50)
+    const age=this.elapsed-(this.flashAt ?? -10000)
+    this.flash.setVisible(age<400).setAlpha(Math.max(0,1-age/400))
+    const highlight = this.play && !this.play.scored && (this.play.boundary || this.play.outcome.wicket)
+    this.frameDelta = Math.min(delta, 50) * (highlight ? 0.76 : 1)
     this.elapsed += this.frameDelta
 
     if (this.phase === 'ready') {
@@ -232,10 +232,11 @@ export default class MatchScene extends Phaser.Scene {
       this.updatePlay()
     }
 
-    const wicket = this.play?.scored && this.play.outcome.wicket
-    if (wicket) {
-      const sinceCall = this.elapsed - this.play.reportAt + 940
-      this.umpire.setPose('signal', progress(sinceCall, 880))
+    const call = this.play
+    if (call?.scored && (call.outcome.wicket || call.boundary)) {
+      const sinceCall = this.elapsed - call.reportAt + 940
+      const signal = call.outcome.wicket ? 'signal' : call.outcome.runs === 6 ? 'six' : 'four'
+      this.umpire.setPose(signal, progress(sinceCall, 880))
     } else {
       this.umpire.setPose('idle', cycle(this.elapsed, 2500))
     }
@@ -243,16 +244,17 @@ export default class MatchScene extends Phaser.Scene {
   }
 
   updateReady() {
-    const [x, y] = this.toScreen(BOWLER_START)
+    const [x, y] = this.bowlerStart
     this.moveHome(this.bowler, x, y, 'idle', 10)
-    this.moveHome(this.keeper, ...this.toScreen(KEEPER), 'keeper', 4)
+    this.moveHome(this.keeper, this.keeperSpot[0], this.keeperSpot[1], 'keeper', 4)
     this.updateBatters()
     let fieldSet = true
-    this.fielders.forEach((fielder, index) => {
+    for (let index = 0; index < this.fielders.length; index++) {
+      const fielder = this.fielders[index]
       const spot = this.fieldSpots[index]
       const speed = 4.4 + (spot.y / this.h) * 1.8
       if (!this.moveHome(fielder, spot.x, spot.y, 'ready', speed, index, spot.facing)) fieldSet = false
-    })
+    }
     if (!fieldSet) return
 
     if (this.fieldChanging) {
@@ -264,7 +266,7 @@ export default class MatchScene extends Phaser.Scene {
   }
 
   moveHome(actor, x, y, pose, speed, offset = 0, facing = actor.facing) {
-    const distance = Phaser.Math.Distance.Between(actor.x, actor.y, x, y)
+    const distance = distanceBetween(actor.x, actor.y, x, y)
     if (distance < 2) {
       this.place(actor, x, y, pose, cycle(this.elapsed + offset * 160, 1640), facing)
       return true
@@ -278,15 +280,15 @@ export default class MatchScene extends Phaser.Scene {
   updateRunUp() {
     const runTime = this.elapsed - this.delivery.startedAt
     const p = progress(runTime, RUN_UP)
-    const [startX, startY] = this.toScreen(BOWLER_START)
-    const [creaseX, creaseY] = this.toScreen(BOWLER_CREASE)
+    const [startX, startY] = this.bowlerStart
+    const [creaseX, creaseY] = this.bowlerCrease
 
     if (runTime < RUN_UP) {
       const stride = p * (0.43 + 0.57 * p)
-      this.place(this.bowler, lerp(startX, creaseX - 10, stride), lerp(startY, creaseY + 15, stride), 'run', cycle(runTime, 300), 1)
+      this.place(this.bowler, lerp(startX, creaseX - 10, stride), lerp(startY, creaseY - 15, stride), 'run', cycle(runTime, 300), 1)
     } else {
       const pRelease = progress(runTime - RUN_UP, RELEASE)
-      this.place(this.bowler, creaseX - 10 + pRelease * 10, creaseY + (1 - pRelease) * 15, 'bowl', pRelease * 0.58, 1)
+      this.place(this.bowler, creaseX - 10 + pRelease * 10, creaseY - (1 - pRelease) * 15, 'bowl', pRelease * 0.58, 1)
       if (pRelease === 1) this.releaseBall()
     }
 
@@ -304,7 +306,7 @@ export default class MatchScene extends Phaser.Scene {
     delivery.fromY = this.bowler.y
     delivery.releaseHeight = 72 * scale
     this.setStage('flight')
-    this.drawBall(delivery.fromX, delivery.fromY, delivery.releaseHeight, 0.51)
+    this.drawBall(delivery.fromX, delivery.fromY, delivery.releaseHeight, 0.35)
     this.trail.start()
   }
 
@@ -312,27 +314,33 @@ export default class MatchScene extends Phaser.Scene {
     const delivery = this.delivery
     const flightTime = this.elapsed - delivery.releasedAt
     const t = flightTime / delivery.pace
-    const travel = Phaser.Math.Clamp(t, 0, 1.17)
+    const travel = clamp(t, 0, 1.17)
     this.updateBatters()
-    const [targetX, targetY] = this.contactPoint()
+    const targetX = this.w * 0.497
+    const targetY = this.batter.y
     const x = lerp(delivery.fromX, targetX + delivery.line, travel)
     const y = lerp(delivery.fromY, targetY, travel)
+    this.bounceMarker.setPosition(lerp(delivery.fromX,targetX+delivery.line,delivery.bounceAt),lerp(delivery.fromY,targetY,delivery.bounceAt)).setVisible(t<delivery.bounceAt+.12 && (this.settings.pitchHint!==false || Math.abs(t-delivery.bounceAt)<.12))
     let height = delivery.releaseHeight * (1 - progress(t, delivery.bounceAt)) ** 1.2
     if (t > delivery.bounceAt) {
       const bounce = (t - delivery.bounceAt) / (1.24 - delivery.bounceAt)
       height = 33 * (1 - (2 * bounce - 1) ** 2)
     }
 
-    this.drawBall(x, y, height, lerp(0.51, 0.27, Math.min(t, 1)))
+    this.drawBall(x, y, height, lerp(0.35, 0.66, Math.min(t, 1)))
     this.updateBowlerFollowThrough(flightTime)
     this.updateFieldReady()
-    const [keeperX, keeperY] = this.toScreen(KEEPER)
+    const [keeperX, keeperY] = this.keeperSpot
     this.place(this.keeper, keeperX + delivery.line * Math.max(0, t - 0.35), keeperY, 'keeper', cycle(flightTime, 880))
 
     const centerAt = delivery.impactAt - CONTACT_DELAY
     const position = 50 + 100 * (this.elapsed - centerAt) / (delivery.pace * 0.94)
     const lockedPosition = delivery.intent?.timing
-    this.timingElement?.style.setProperty('--timing', `${Math.round(Phaser.Math.Clamp(lockedPosition ?? position, 0, 100))}%`)
+    const marker = Math.round(clamp(lockedPosition ?? position, 0, 100))
+    if (marker !== this.lastMarker) {
+      this.timingElement?.style.setProperty('--timing', marker + '%')
+      this.lastMarker = marker
+    }
 
     const intent = delivery.intent
     if (intent?.hit && this.elapsed >= intent.contactAt) {
@@ -343,20 +351,21 @@ export default class MatchScene extends Phaser.Scene {
   }
 
   updateBowlerFollowThrough(flightTime) {
-    const [x, y] = this.toScreen(BOWLER_CREASE)
+    const [x, y] = this.bowlerCrease
     const stride = smooth(progress(flightTime, 390))
-    this.place(this.bowler, x + stride * 16, y - stride * 38, 'bowl', 0.58 + 0.42 * progress(flightTime, 370), 1)
+    this.place(this.bowler, x + stride * 16, y + stride * 29, 'bowl', 0.58 + 0.42 * progress(flightTime, 370), 1)
   }
 
   updateFieldReady() {
     const p = this.phase === 'flight' ? 1 : progress(this.elapsed - this.delivery.startedAt, RUN_UP)
-    this.fielders.forEach((fielder, index) => {
+    for (let index = 0; index < this.fielders.length; index++) {
+      const fielder = this.fielders[index]
       const spot = this.fieldSpots[index]
       const step = spot.deep ? 0 : p * 0.026
       const x = lerp(spot.x, this.w * STRIKER[0], step)
       const y = lerp(spot.y, this.h * STRIKER[1], step)
       this.place(fielder, x, y, 'ready', cycle(this.elapsed + index * 170, 1670), spot.facing)
-    })
+    }
   }
 
   updateBatters() {
@@ -365,69 +374,41 @@ export default class MatchScene extends Phaser.Scene {
   }
 
   updateStriker() {
-    const [x, y] = this.toScreen(STRIKER)
-    const offset = this.footwork === 'advance' ? 14 : this.footwork === 'back' ? -7 : 0
+    const [x, y] = this.strikerSpot
+    const offset = this.footwork === 'advance' ? -14 : this.footwork === 'back' ? 7 : 0
     const targetY = y + offset
     const maxStep = this.frameDelta * 0.16
-    const batterY = this.batter.y + Phaser.Math.Clamp(targetY - this.batter.y, -maxStep, maxStep)
+    const batterY = this.batter.y + clamp(targetY - this.batter.y, -maxStep, maxStep)
     const intent = this.delivery?.intent
 
     if (intent?.grade === 'leave') {
-      this.place(this.batter, lerp(this.batter.x, x + 10, 0.2), batterY, 'ready', 0.84, -1)
+      this.place(this.batter, lerp(this.batter.x, x + 10, 1 - Math.exp(-this.frameDelta / 75)), batterY, 'ready', 0.84, -1)
     } else if (intent && this.elapsed - intent.startedAt <= SWING_TIME) {
       this.batter.setPose('swing', progress(this.elapsed - intent.startedAt, SWING_TIME), -1)
     } else {
       const readyTime = this.elapsed - (this.delivery?.startedAt ?? 0)
-      this.place(this.batter, lerp(this.batter.x, x, 0.2), batterY, 'ready', cycle(readyTime, 1190), -1)
+      this.place(this.batter, lerp(this.batter.x, x, 1 - Math.exp(-this.frameDelta / 75)), batterY, 'ready', cycle(readyTime, 1190), -1)
     }
   }
 
   updateNonStriker() {
-    const [homeX, homeY] = this.toScreen(NON_STRIKER)
+    const [homeX, homeY] = this.partnerSpot
     const liveDelivery = this.phase === 'flight'
     if (liveDelivery) {
       // Back up only after release, with a few steps towards the far end.
       const sinceRelease = this.elapsed - this.delivery.releasedAt - 30
       const step = smooth(progress(sinceRelease, 430))
       const pose = step > 0 && step < 1 ? 'run' : 'idle'
-      this.place(this.partner, homeX - step * 11, homeY - step * 34, pose, cycle(Math.max(0, sinceRelease), 465), -1)
+      this.place(this.partner, homeX - step * 11, homeY + step * 34, pose, cycle(Math.max(0, sinceRelease), 465), -1)
       return
     }
 
     // On a leave, dot, or boundary the partner can walk back into their ground.
-    const distance = Phaser.Math.Distance.Between(this.partner.x, this.partner.y, homeX, homeY)
+    const distance = distanceBetween(this.partner.x, this.partner.y, homeX, homeY)
     const step = Math.min(1, this.frameDelta * 0.10 / Math.max(1, distance))
     const pose = distance > 2 ? 'run' : 'idle'
     const facing = distance > 2 && this.partner.y < homeY ? 1 : -1
     this.place(this.partner, lerp(this.partner.x, homeX, step), lerp(this.partner.y, homeY, step), pose, cycle(this.elapsed, 570), facing)
-  }
-
-  contactPoint() {
-    return [this.w * 0.501, this.batter.y]
-  }
-
-  onPointerDown(pointer) {
-    if (!this.paused) this.pointerStart = { x: pointer.x, id: pointer.id }
-  }
-
-  onPointerUp(pointer) {
-    if (!this.pointerStart || this.pointerStart.id !== pointer.id) return
-    const deltaX = pointer.x - this.pointerStart.x
-    this.clearPointer()
-    const direction = deltaX < -28 ? 'leg' : deltaX > 28 ? 'off' : 'straight'
-    this.swing(direction)
-  }
-
-  clearPointer() {
-    this.pointerStart = null
-  }
-
-  onKeyDown(event) {
-    if (event.repeat || event.target?.closest?.('button, input, select, textarea, [contenteditable]')) return
-    const direction = { Space: 'straight', ArrowLeft: 'leg', ArrowRight: 'off' }[event.code]
-    if (!direction) return
-    event.preventDefault()
-    this.swing(direction)
   }
 
   setFootwork(footwork) {
@@ -461,7 +442,7 @@ export default class MatchScene extends Phaser.Scene {
       runs = loft || Math.random() < 0.34 ? 6 : 4
     } else if (accuracy <= 0.27) {
       grade = 'good'
-      runs = Phaser.Math.Between(1, 3)
+      runs = randomInt(1, 3)
     } else if (accuracy <= 0.41 && Math.random() < 0.38) {
       caught = true
     }
@@ -487,8 +468,8 @@ export default class MatchScene extends Phaser.Scene {
     let runOut = false
     if (interception && intent.runs >= 2) {
       // A fielder cutting off the ball early makes a second run a real gamble.
-      const earlyGather = Phaser.Math.Clamp((0.76 - interception.fraction) / 0.28, 0, 1)
-      const risk = Phaser.Math.Clamp(0.2 + earlyGather * 0.22 + (intent.runs === 3 ? 0.28 : 0), 0, 0.72)
+      const earlyGather = clamp((0.76 - interception.fraction) / 0.28, 0, 1)
+      const risk = clamp(0.2 + earlyGather * 0.22 + (intent.runs === 3 ? 0.28 : 0), 0, 0.72)
       runOut = Math.random() < risk
       if (runOut) intent.runs--
     }
@@ -516,7 +497,7 @@ export default class MatchScene extends Phaser.Scene {
       const [ropeX, ropeY] = this.toScreen(boundaryPoint(intent.direction))
       fieldGoalX = lerp(ropeX, this.w * 0.5, 0.065)
       fieldGoalY = lerp(ropeY, this.h * BOUNDARY_CENTER_Y, 0.065)
-      const chaseDistance = Phaser.Math.Distance.Between(fielder.x, fielder.y, fieldGoalX, fieldGoalY)
+      const chaseDistance = distanceBetween(fielder.x, fielder.y, fieldGoalX, fieldGoalY)
       const reach = Math.min(1, (flight - 60) * 0.31 / Math.max(1, chaseDistance))
       fieldGoalX = lerp(fielder.x, fieldGoalX, reach)
       fieldGoalY = lerp(fielder.y, fieldGoalY, reach)
@@ -525,7 +506,7 @@ export default class MatchScene extends Phaser.Scene {
     const diveEnd = diveAt === null ? 0 : diveAt + DIVE_DURATION
     const duration = Math.max(running?.duration ?? 0, flight + fieldingTime, diveEnd, 690)
     const backingUp = this.fielders.filter(actor => actor !== fielder).map(actor => {
-      const distance = Phaser.Math.Distance.Between(actor.x, actor.y, destinationX, destinationY)
+      const distance = distanceBetween(actor.x, actor.y, destinationX, destinationY)
       const step = Math.min(0.18, 22 / Math.max(1, distance))
       return {
         actor, fromX: actor.x, fromY: actor.y,
@@ -547,12 +528,12 @@ export default class MatchScene extends Phaser.Scene {
   shotDestination(intent, side) {
     if (intent.runs >= 4) {
       const [x, y] = boundaryPoint(intent.direction)
-      const carry = intent.runs === 6 ? 1.08 : 1
+      const carry = 1.04
       return this.toScreen([lerp(0.5, x, carry), lerp(BOUNDARY_CENTER_Y, y, carry)])
     }
 
     const distance = 0.20 + intent.runs * 0.067
-    return this.toScreen([0.5 + distance * (side || 0.32), side ? 0.59 : 0.59 + intent.runs * 0.055])
+    return this.toScreen([0.5 + distance * (side || 0.32), side ? 0.578 : 0.578 - intent.runs * 0.055])
   }
 
   findInterception(intent, fromX, fromY, targetX, targetY) {
@@ -564,7 +545,7 @@ export default class MatchScene extends Phaser.Scene {
       const x = lerp(fromX, targetX, fraction)
       const y = lerp(fromY, targetY, fraction)
       const fielder = this.closestFielder(x, y)
-      if (Phaser.Math.Distance.Squared(fielder.x, fielder.y, x, y) <= reach ** 2) return { fielder, x, y, fraction }
+      if (squaredDistance(fielder.x, fielder.y, x, y) <= reach ** 2) return { fielder, x, y, fraction }
     }
     return null
   }
@@ -587,6 +568,7 @@ export default class MatchScene extends Phaser.Scene {
   }
 
   startPlay(play, grade) {
+    this.bounceMarker.setVisible(false)
     this.play = { ...play, startedAt: this.elapsed, scored: false }
     this.setStage('result', grade)
   }
@@ -595,7 +577,7 @@ export default class MatchScene extends Phaser.Scene {
     let closest = this.fielders[0]
     let bestDistance = Infinity
     for (const fielder of this.fielders) {
-      const distance = Phaser.Math.Distance.Squared(x, y, fielder.x, fielder.y)
+      const distance = squaredDistance(x, y, fielder.x, fielder.y)
       if (distance < bestDistance) {
         closest = fielder
         bestDistance = distance
@@ -625,18 +607,31 @@ export default class MatchScene extends Phaser.Scene {
 
   updateShot(play, elapsed) {
     const t = progress(elapsed, play.flight)
-    const groundShot = !play.intent.caught && play.intent.runs !== 6 && !play.intent.loft
+    const groundShot = !play.intent.caught && play.intent.runs !== 6 && (!play.intent.loft || play.intent.runs===4)
     const travel = groundShot ? 1 - (1 - t) ** 1.6 : t
-    const air = groundShot ? progress(elapsed, 330) : t
+    const firstLanding = groundShot ? 330 : play.flight
+    const air = progress(elapsed, firstLanding)
     const x = lerp(play.fromX, play.destinationX, travel)
     const y = lerp(play.fromY, play.destinationY, travel)
     const loftHeight = play.intent.caught ? 58 : play.intent.runs === 6 ? 134 : play.intent.loft ? 66 : 29
     const height = Math.max(0, play.fromHeight * (1 - air)) + Math.sin(air * Math.PI) * loftHeight
+    if (play.boundary && !play.crossed && y / this.h <= ropeY(x / this.w)) {
+      // Compare the landing point with the rope even if a frame spans both events.
+      const landingTravel = groundShot ? 1 - (1 - progress(firstLanding, play.flight)) ** 1.6 : 1
+      const landingX = lerp(play.fromX, play.destinationX, landingTravel) / this.w
+      const landingY = lerp(play.fromY, play.destinationY, landingTravel) / this.h
+      const bouncedInside = landingY > ropeY(landingX)
+      play.crossed = true
+      play.outcome.runs = bouncedInside ? 4 : 6
+      play.label = bouncedInside ? 'FOUR!' : 'SIX!'
+      this.flashAt=this.elapsed
+      this.fieldDisplay?.label.closest('.game-frame')?.animate([{transform:'translateX(2px)'},{transform:'translateX(-2px)'},{transform:'none'}],180)
+    }
     const facing = Math.sign(play.fieldGoalX - play.fielderX) || 1
 
     if (elapsed < play.flight) {
       const landingHeight = play.intent.caught ? t * 31 : 0
-      this.drawBall(x, y, height + landingHeight, lerp(0.32, 0.25, t))
+      this.drawBall(x, y, height + landingHeight, lerp(0.62, 0.33, t))
       if (play.diveAt === null || elapsed < play.diveAt) {
         const chase = progress(elapsed - 45, play.diveAt === null ? play.flight - 65 : play.diveAt - 45)
         const x = lerp(play.fielderX, play.fieldGoalX, chase)
@@ -656,15 +651,16 @@ export default class MatchScene extends Phaser.Scene {
     if (play.running) this.updateRunningBatters(play, elapsed)
     else this.updateBatters()
 
-    play.backingUp.forEach(({ actor, fromX, fromY, toX, toY }, index) => {
+    for (let index = 0; index < play.backingUp.length; index++) {
+      const { actor, fromX, fromY, toX, toY } = play.backingUp[index]
       const moveAt = 85 + index * 28
       const step = smooth(progress(elapsed - moveAt, 340))
       const pose = step > 0 && step < 1 ? 'run' : 'ready'
       const facing = Math.sign(toX - fromX) || actor.facing
       this.place(actor, lerp(fromX, toX, step), lerp(fromY, toY, step), pose, cycle(elapsed + moveAt, 410), facing)
-    })
+    }
 
-    const [keeperX, keeperY] = this.toScreen(KEEPER)
+    const [keeperX, keeperY] = this.keeperSpot
     const keeperStep = smooth(progress(elapsed, 460))
     const returning = !play.boundary && !play.intent.caught && elapsed > play.flight + 255
     if (returning) {
@@ -686,7 +682,7 @@ export default class MatchScene extends Phaser.Scene {
     }
 
     const { fielder, fieldGoalX, fieldGoalY } = play
-    if (play.intent.caught || play.intent.runOut) {
+    if (play.intent.caught) {
       this.hideBall()
       this.place(fielder, fieldGoalX, fieldGoalY, 'appeal', progress(elapsed, 220), facing)
       return
@@ -700,7 +696,7 @@ export default class MatchScene extends Phaser.Scene {
       this.place(fielder, fieldGoalX, fieldGoalY, 'throw', progress(elapsed - 110, 145) * 0.58, -facing)
     } else {
       const t = progress(elapsed - 255, play.throwTime)
-      const [x, y] = this.toScreen(KEEPER)
+      const [x, y] = this.keeperSpot
       const scale = this.playerScale(fieldGoalY)
       this.place(fielder, fieldGoalX, fieldGoalY, 'throw', 0.58 + progress(elapsed - 255, 172) * 0.42, -facing)
       if (t < 1) this.drawBall(lerp(fieldGoalX - 29 * scale * facing, x, t), lerp(fieldGoalY, y, t), lerp(48 * scale, 12, t) + 17 * Math.sin(Math.PI * t), 0.27)
@@ -717,15 +713,15 @@ export default class MatchScene extends Phaser.Scene {
       count: intent.runs,
       duration: Math.max(strikerStart, partnerStart) + intent.runs * RUN_LEG - TURN_FOR_NEXT_RUN,
       striker: {
-        actor: this.batter, towardsNear: true, startAt: strikerStart, strideOffset: 50,
+        actor: this.batter, towardsNear: false, startAt: strikerStart, strideOffset: 50,
         from: [this.batter.x, this.batter.y],
       },
       partner: {
-        actor: this.partner, towardsNear: false, startAt: partnerStart, strideOffset: 130,
+        actor: this.partner, towardsNear: true, startAt: partnerStart, strideOffset: 130,
         from: [this.partner.x, this.partner.y],
       },
-      far: this.toScreen(FAR_GROUND),
-      near: this.toScreen(NEAR_GROUND),
+      far: this.toScreen(PARTNER_GROUND),
+      near: this.toScreen(STRIKER_GROUND),
     }
   }
 
@@ -769,23 +765,24 @@ export default class MatchScene extends Phaser.Scene {
 
   updateMiss(play, elapsed) {
     this.updateBatters()
-    const [keeperX, keeperY] = this.toScreen(KEEPER)
+    const [keeperX, keeperY] = this.keeperSpot
     const t = progress(elapsed, 235)
     const takeX = keeperX + this.delivery.line * 0.8
     const keeperPose = play.outcome.wicket && t > 0.9 ? 'appeal' : 'collect'
     const keeperPhase = keeperPose === 'appeal' ? progress(elapsed - 195, 200) : t
     this.place(this.keeper, lerp(play.keeperX, takeX, t), keeperY + 6 * Math.sin(t * Math.PI), keeperPose, keeperPhase)
-    this.fielders.forEach((fielder, index) => {
+    for (let index = 0; index < this.fielders.length; index++) {
+      const fielder = this.fielders[index]
       const appealing = play.outcome.wicket && index < 2
       const pose = appealing ? 'appeal' : 'ready'
       const phase = appealing ? progress(elapsed - 65, 670) : cycle(elapsed + index * 167, 1630)
       fielder.setPose(pose, phase)
-    })
+    }
 
     if (play.kind === 'bowled') {
       // The deflection is kept near the far stumps, then the keeper steps in.
       const rebound = progress(elapsed, 200)
-      if (rebound < 1) this.drawBall(lerp(play.fromX, this.w * 0.47, rebound), lerp(play.fromY, this.h * 0.426, rebound), Math.sin(rebound * Math.PI) * 24, 0.27)
+      if (rebound < 1) this.drawBall(lerp(play.fromX, this.w * 0.47, rebound), lerp(play.fromY, this.h * 0.756, rebound), Math.sin(rebound * Math.PI) * 24, 0.27)
       else this.hideBall()
     } else if (play.kind === 'lbw') {
       this.hideBall()
@@ -798,7 +795,7 @@ export default class MatchScene extends Phaser.Scene {
 
   drawBall(x, y, height, scale) {
     this.ball.setPosition(x, y - height).setScale(scale).setVisible(true)
-    this.ballShadow.setPosition(x, y).setAlpha(Phaser.Math.Clamp(0.52 - height * 0.004, 0.08, 0.52)).setVisible(true)
+    this.ballShadow.setPosition(x, y).setAlpha(clamp(0.52 - height * 0.004, 0.08, 0.52)).setVisible(true)
   }
 
   hideBall() {
@@ -823,15 +820,17 @@ export default class MatchScene extends Phaser.Scene {
     if (this.recentDeliveries.length > 4) this.recentDeliveries.shift()
     if (outcome.wicket) {
       this.wickets++
+      this.batter.playerName = BATTING_ORDER[Math.min(this.wickets + 1, BATTING_ORDER.length - 1)]
       this.soundEffect('wicket')
       this.vibrate([35, 35, 60])
     } else if (outcome.runs >= 4) {
       this.soundEffect('crowd')
     }
 
-    this.popup.setText(label).setColor(outcome.wicket ? '#ff8d79' : '#ffe37b').setAlpha(1).setScale(0.64)
-    this.tweens.add({ targets: this.popup, scale: 1, duration: 160, ease: 'Back.easeOut' })
-    this.tweens.add({ targets: this.popup, alpha: 0, delay: 680, duration: 230 })
+    this.wheel.push({end:toRadarPoint((play.destinationX ?? play.fromX)/this.w,(play.destinationY ?? play.fromY)/this.h),runs:outcome.runs})
+    this.milestone=[100,50].find(n=>this.score>=n && this.score-outcome.runs<n)
+    this.lastLabel = label
+    this.lastWicket = outcome.wicket
 
     this.finished = this.balls >= this.totalBalls || this.wickets >= 10
     play.reportAt = this.elapsed + 940
@@ -840,30 +839,16 @@ export default class MatchScene extends Phaser.Scene {
 
   snapshot() {
     return {
-      score: this.score, wickets: this.wickets, balls: this.balls,
+      wheel:[...this.wheel], milestone:this.milestone, powerplay:this.balls<6*Math.max(1,Math.round(this.settings.overs*.3)), score: this.score, wickets: this.wickets, balls: this.balls,
       overs: `${Math.floor(this.balls / 6)}.${this.balls % 6}`,
       totalBalls: this.totalBalls, extras: this.extras,
+      striker: this.batter.playerName, bowler: BOWLERS[Math.floor(this.balls / 6) % BOWLERS.length],
+      lastLabel: this.lastLabel, lastWicket: this.lastWicket,
     }
   }
 
   soundEffect(kind) {
-    if (this.settings.sound === false) return
-    try {
-      const Audio = window.AudioContext || window.webkitAudioContext
-      if (!Audio) return
-      this.audio ||= new Audio()
-      if (this.audio.state === 'suspended') this.audio.resume().catch(() => {})
-      const osc = this.audio.createOscillator()
-      const gain = this.audio.createGain()
-      osc.connect(gain)
-      gain.connect(this.audio.destination)
-      osc.frequency.value = { wicket: 180, crowd: 540, hit: 330 }[kind]
-      const now = this.audio.currentTime
-      gain.gain.setValueAtTime(0.045, now)
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16)
-      osc.start()
-      osc.stop(now + 0.16)
-    } catch {}
+    if (this.settings.sound !== false) playSound(kind)
   }
 
   vibrate(pattern) {
@@ -871,23 +856,10 @@ export default class MatchScene extends Phaser.Scene {
   }
 
   setPaused(value) {
+    if (this.paused === value) return
     this.paused = value
-    this.clearPointer()
-    if (value) {
-      this.tweens.pauseAll()
-      this.trail?.pause()
-    } else {
-      this.tweens.resumeAll()
-      this.trail?.resume()
-    }
-  }
-
-  onShutdown() {
-    this.input.off('pointerdown', this.onPointerDown, this)
-    this.input.off('pointerup', this.onPointerUp, this)
-    this.input.off('pointerupoutside', this.clearPointer, this)
-    this.input.keyboard?.off('keydown', this.onKeyDown, this)
-    this.audio?.close().catch(() => {})
-    this.audio = null
+    if (value) this.trail?.pause()
+    else this.trail?.resume()
+    this.onPauseChange?.()
   }
 }

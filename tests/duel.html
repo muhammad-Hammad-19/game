@@ -1,0 +1,17 @@
+<!doctype html>
+<!-- Dev-only: two copies of the game side by side for testing an online duel.
+     Uses the local test link by default; add ?real=1 to go through PeerJS. -->
+<meta charset="utf-8">
+<title>Duel test</title>
+<style>
+  body { margin: 0; background: #111; display: flex; flex-wrap: wrap; gap: 6px; }
+  iframe { width: 660px; height: 372px; border: 0; }
+</style>
+<iframe id="host"></iframe>
+<iframe id="guest"></iframe>
+<script>
+  // ?real=1 uses the public PeerJS service; ?peer=localhost:9000 uses a server you run (npx peer --port 9000).
+  const query = new URLSearchParams(location.search)
+  const src = query.has('peer') ? '/?peer=' + query.get('peer') : query.has('real') ? '/' : '/?net=local'
+  for (const frame of document.querySelectorAll('iframe')) frame.src = src
+</script>

@@ -1,4 +1,6 @@
 import * as THREE from 'three'
+import { Figure, playerModelReady } from './PlayerModel.js'
+import { mapPoint } from './viewMap.js'
 
 const WIDTH = 960
 const HEIGHT = 540
@@ -11,23 +13,15 @@ const makeCanvas = (width, height) => {
 
 export class TextureStore extends Map {
   createCanvas(key, width, height) {
+    this.onReplace?.(this.get(key))
     const source = makeCanvas(width, height)
-    const texture = { source, frames: new Map(), getContext: () => source.getContext('2d'), addFrame(id, x, y, w, h) { this.frames.set(id, { x, y, w, h }) } }
+    const texture = { source, resolution: 1, frames: new Map(), getContext: () => source.getContext('2d'), addFrame(id, x, y, w, h) { this.frames.set(id, { x, y, w, h }) } }
     this.set(key, texture)
     return texture
   }
-  async prepareSprites(signal) {
-    if (typeof createImageBitmap !== 'function') return
-    for (const texture of this.values()) {
-      if (!texture.frames?.size) continue
-      signal.throwIfAborted()
-      const canvas = texture.source
-      let bitmap
-      try { bitmap = await createImageBitmap(canvas, { imageOrientation: 'flipY' }) } catch { continue }
-      if (signal.aborted) { bitmap.close(); signal.throwIfAborted() }
-      texture.source = bitmap
-      canvas.width = canvas.height = 1
-    }
+  remove(key) {
+    this.onReplace?.(this.get(key))
+    this.delete(key)
   }
   clear() {
     for (const texture of this.values()) texture.source.close?.()
@@ -43,6 +37,11 @@ class DisplayObject {
     this.alpha = 1
     this.visible = true
     this.scale = 1
+    this.rotation = 0
+    // `lift` raises an object straight up the screen (a ball in the air); `fixed` objects
+    // are full-frame layers that ignore the camera-angle mapping.
+    this.lift = 0
+    this.fixed = false
     owner.scene.add(mesh)
     owner.objects.push(this)
   }
@@ -50,10 +49,15 @@ class DisplayObject {
   setDepth(depth) { this.depth = depth; this.sync(); return this }
   setVisible(visible) { this.visible = visible; this.mesh.visible = visible; return this }
   setAlpha(alpha) { this.alpha = alpha; this.mesh.material.opacity = alpha; return this }
+  setTint(color) { this.mesh.material.color.set(color); return this }
   setScale(scale) { this.scale = scale; this.sync(); return this }
+  setRotation(angle) { this.rotation = angle; this.mesh.rotation.z = -angle; return this }
+  setLift(lift) { this.lift = lift; this.sync(); return this }
+  setFixed() { this.fixed = true; this.sync(); return this }
   sync() {
-    this.mesh.position.x = (this.x ?? 0) + (this.width || 0) * this.scale * (0.5 - (this.originX ?? 0.5))
-    this.mesh.position.y = -((this.y ?? 0) + (this.height || 0) * this.scale * (0.5 - (this.originY ?? 0.5)))
+    const [x, y] = this.fixed ? [this.x ?? 0, this.y ?? 0] : this.owner.project(this.x ?? 0, this.y ?? 0)
+    this.mesh.position.x = x + (this.width || 0) * this.scale * (0.5 - (this.originX ?? 0.5))
+    this.mesh.position.y = -(y - this.lift + (this.height || 0) * this.scale * (0.5 - (this.originY ?? 0.5)))
     this.mesh.renderOrder = this.depth
     this.mesh.position.z = this.depth * 0.001
     this.mesh.scale.set(this.width * this.scale || 1, this.height * this.scale || 1, 1)
@@ -75,9 +79,11 @@ class Sprite extends DisplayObject {
     this.setPosition(x, y)
   }
   setFrame(id) {
+    this.frameId = id
     this.frame = this.texture.frames?.get(id)
-    this.width = this.frame?.w ?? this.source.width
-    this.height = this.frame?.h ?? this.source.height
+    const resolution = this.texture.resolution || 1
+    this.width = (this.frame?.w ?? this.source.width) / resolution
+    this.height = (this.frame?.h ?? this.source.height) / resolution
     if (this.frame) {
       const left = this.frame.x / this.source.width
       const right = (this.frame.x + this.frame.w) / this.source.width
@@ -111,8 +117,10 @@ class Shadow extends DisplayObject {
     this.radiusX = width / 2; this.radiusY = height / 2
     this.setPosition(x, y)
   }
+  setSize(width, height) { this.radiusX = width / 2; this.radiusY = height / 2; this.sync(); return this }
   sync() {
-    this.mesh.position.set(this.x ?? 0, -(this.y ?? 0), this.depth * 0.001)
+    const [x, y] = this.owner.project(this.x ?? 0, this.y ?? 0)
+    this.mesh.position.set(x, -y, this.depth * 0.001)
     this.mesh.renderOrder = this.depth
     this.mesh.scale.set(this.radiusX * this.scale, this.radiusY * this.scale, 1)
   }
@@ -165,7 +173,7 @@ class BallTrail extends DisplayObject {
       this.remainder += delta
       if (this.remainder >= this.interval) {
         this.remainder %= this.interval
-        this.geometry.attributes.position.setXYZ(this.head, this.ball.x, -this.ball.y, 1)
+        this.geometry.attributes.position.setXYZ(this.head, this.ball.mesh.position.x, this.ball.mesh.position.y, 1)
         this.ages[this.head] = 0
         this.head = (this.head + 1) % this.count
       }
@@ -188,19 +196,28 @@ export class FieldCanvas {
     this.scale = { width: WIDTH, height: HEIGHT }
     this.scene = new THREE.Scene()
     this.scene.background = new THREE.Color('#0e2422')
-    this.camera = new THREE.OrthographicCamera(-WIDTH / 2, WIDTH / 2, HEIGHT / 2, -HEIGHT / 2, 0.1, 100)
-    this.camera.position.set(WIDTH / 2, -HEIGHT / 2, 50)
+    // Deep enough for the 3D players, which stand at different distances from the lens.
+    this.camera = new THREE.OrthographicCamera(-WIDTH / 2, WIDTH / 2, HEIGHT / 2, -HEIGHT / 2, 1, 4000)
+    this.camera.position.set(WIDTH / 2, -HEIGHT / 2, 2000)
+    this.useModels = false
+    this.addLights()
     this.renderer = new THREE.WebGLRenderer({ alpha: false, antialias: true, powerPreference: 'high-performance' })
+    this.quality = 'High'
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.domElement.style.cssText = 'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:block;pointer-events:none'
     mount.append(this.renderer.domElement)
     this.objects = []
+    this.textures.onReplace = texture => {
+      const map = texture && this.textureMaps.get(texture)
+      if (map) { map.dispose(); this.textureMaps.delete(texture) }
+    }
     this.textureFor = texture => {
       let map = this.textureMaps.get(texture)
       if (!map) {
         map = new THREE.Texture(texture.source)
         map.colorSpace = THREE.SRGBColorSpace
+        map.anisotropy = 4
         map.needsUpdate = true
         this.textureMaps.set(texture, map)
       }
@@ -211,6 +228,8 @@ export class FieldCanvas {
       ellipse: (...args) => new Shadow(this, ...args),
       graphics: () => new Rope(this),
       particles: (_x, _y, _key, options) => this.trail = new BallTrail(this, options),
+      // Returns nothing when 3D players are off, and the caller falls back to sprites.
+      figure: (x, y, options) => (this.useModels && playerModelReady() ? new Figure(this, x, y, options) : null),
     }
     this.resize()
   }
@@ -218,6 +237,7 @@ export class FieldCanvas {
     for (const object of this.objects) object.dispose()
     this.objects.length = 0; this.trail = null; this.scene.clear()
     this.scene.background = new THREE.Color('#0e2422')
+    this.addLights()
   }
   resize() {
     const width = Math.min(this.mount.clientWidth, this.mount.clientHeight * WIDTH / HEIGHT)
@@ -227,10 +247,38 @@ export class FieldCanvas {
     this.renderer.domElement.style.width = width + 'px'
     this.renderer.domElement.style.height = height + 'px'
   }
-  draw(zoom = 1) {
+  // Evening floodlights: a soft fill plus a key light from high on the left.
+  addLights() {
+    const key = new THREE.DirectionalLight(0xfff1dc, 2.1)
+    key.position.set(-0.55, 0.9, 1)
+    const rim = new THREE.DirectionalLight(0x9fc4ff, 0.7)
+    rim.position.set(0.8, 0.5, -0.4)
+    this.scene.add(new THREE.AmbientLight(0xffffff, 1.15), key, rim)
+  }
+  setQuality(quality) {
+    this.quality = quality
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, quality === 'Low' ? 1 : 2))
+    this.resize()
+  }
+  // Match-layout pixels to screen pixels for the behind-the-bowler angle.
+  project(x, y) {
+    const [px, py] = mapPoint(x / WIDTH, y / HEIGHT)
+    return [px * WIDTH, py * HEIGHT]
+  }
+  // view: { x, y, zoom } in match-layout pixels. The view is kept inside the picture.
+  draw(view) {
+    if (view) {
+      const [vx, vy] = this.project(view.x, view.y)
+      view = { x: vx, y: vy, zoom: view.zoom }
+    }
+    const zoom = Math.max(1, view?.zoom ?? 1)
+    const halfWidth = WIDTH / 2 / zoom
+    const halfHeight = HEIGHT / 2 / zoom
+    const x = Math.max(halfWidth, Math.min(WIDTH - halfWidth, view?.x ?? WIDTH / 2))
+    const y = Math.max(halfHeight, Math.min(HEIGHT - halfHeight, view?.y ?? HEIGHT / 2))
     this.camera.zoom = zoom
-    const centerY = HEIGHT / 2 + (1 - zoom) * 290
-    this.camera.position.y = -centerY
+    this.camera.position.x = x
+    this.camera.position.y = -y
     this.camera.updateProjectionMatrix()
     this.renderer.render(this.scene, this.camera)
   }

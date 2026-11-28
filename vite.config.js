@@ -5,8 +5,9 @@ import autoprefixer from 'autoprefixer'
 
 export default defineConfig({
   plugins: [react()],
-  // The public folder holds the original PNGs. Only import the optimized match assets.
-  publicDir: false,
+  // The public folder holds the original PNGs, which are not shipped. `static` holds the
+  // files that must keep their names: the web app manifest, service worker and icons.
+  publicDir: 'static',
   css: { postcss: { plugins: [tailwindcss(), autoprefixer()] } },
   build: {
     rollupOptions: {

@@ -3,13 +3,7 @@ const FRAME_HEIGHT = 88
 const GROUND_Y = 79
 const FRAME_COUNT = 12
 const TAU = Math.PI * 2
-
-const KITS = {
-  blue: { shirt: 0x1b4cb0, shadow: 0x11264e, highlight: 0x4a80dc, trim: 0x76c9fc },
-  fielding: { shirt: 0x237bc2, shadow: 0x123766, highlight: 0x59a4df, trim: 0xffac42 },
-  red: { shirt: 0xc03843, shadow: 0x60242c, highlight: 0xe47578, trim: 0xf6e1ce },
-  white: { shirt: 0xdddfe3, shadow: 0x868f9f, highlight: 0xf9f8ef, trim: 0x384653 }
-}
+const HEAD_SCALE = 0.87
 
 const DARK_FABRIC = ['#151e25', '#2d3941', '#495660']
 const SKIN = ['#75452d', '#aa6d48', '#ce966a']
@@ -76,6 +70,11 @@ const BAT_PUSH_OFF = pose(
   [2, -23, 9, -40, 13, 2],
   [-2, -27, 5, -21], [17, -30, 13, -23],
   [-6, -12, -12, -3], [7, -12, 9, 0], 143
+)
+const BAT_RAISE = pose(
+  [0, -26, 0, -45, 15, 0],
+  [-10, -31, -12, -22], [13, -52, 16, -66],
+  [-5, -13, -7, 0], [5, -13, 7, 0], -92
 )
 const KEEPER_READY = pose(
   [0, -16, 3, -32, 16, 0],
@@ -169,14 +168,14 @@ const THROW_RELEASE = pose(
 )
 
 const UMPIRE_POSES = ['idle', 'signal', 'four', 'six']
-const ACTOR_POSES = {
-  batter: ['idle', 'ready', 'run', 'swing', 'ground', 'turn'],
-  fielder: ['idle', 'ready', 'run', 'collect', 'throw', 'appeal', 'dive'],
-  bowler: ['idle', 'run', 'bowl'],
+export const ACTOR_POSES = {
+  batter: ['idle', 'ready', 'run', 'swing', 'ground', 'turn', 'raise'],
+  fielder: ['idle', 'ready', 'run', 'collect', 'throw', 'appeal', 'dive', 'cheer'],
+  bowler: ['idle', 'run', 'bowl', 'appeal', 'cheer'],
   keeper: ['idle', 'ready', 'keeper', 'run', 'collect', 'appeal'],
   umpire: UMPIRE_POSES,
 }
-const LOOPS = new Set(['idle', 'ready', 'run', 'keeper'])
+export const LOOPS = new Set(['idle', 'ready', 'run', 'keeper'])
 const BAT_STANCE_CYCLE = [[0, BAT_READY], [.22, BAT_BACKLIFT], [.48, BAT_TAP], [.66, BAT_TAP], [1, BAT_READY]]
 const BAT_GROUND_SEQUENCE = [[0, BAT_REACH], [.38, BAT_GROUNDED], [.64, BAT_GROUNDED], [1, BAT_GROUND_HOLD]]
 const BAT_TURN_SEQUENCE = [[0, BAT_GROUND_HOLD], [.39, BAT_PIVOT], [.57, BAT_PIVOT], [1, BAT_PUSH_OFF]]
@@ -228,7 +227,7 @@ function runningBatterPose(progress) {
   )
 }
 
-function getPose(name, progress, role) {
+export function getPose(name, progress, role) {
   const ready = role === 'batter' ? BAT_READY : role === 'keeper' ? KEEPER_READY : FIELD_READY
   if (role === 'batter') {
     switch (name) {
@@ -242,6 +241,8 @@ function getPose(name, progress, role) {
         return samplePose(BAT_GROUND_SEQUENCE, progress)
       case 'turn':
         return samplePose(BAT_TURN_SEQUENCE, progress)
+      case 'raise':
+        return blendPose(BAT_WATCH, BAT_RAISE, Math.min(1, progress * 4, (1 - progress) * 4))
     }
   }
 
@@ -260,6 +261,15 @@ function getPose(name, progress, role) {
       return blendPose(ready, COLLECT, Math.sin(progress * Math.PI / 2))
     case 'appeal':
       return blendPose(ready, APPEAL, Math.sin(progress * Math.PI))
+    case 'cheer': {
+      // Two quick jumps with both arms up.
+      const lift = Math.abs(Math.sin(progress * TAU))
+      const up = blendPose(STANDING, APPEAL, Math.min(1, progress * 5, (1 - progress) * 5))
+      const [hipX, hipY, shoulderX, shoulderY, width, tilt] = up.body
+      const rise = lift * 5
+      const raise = ([ax, ay, bx, by]) => [ax, ay - rise, bx, by - rise]
+      return { ...up, body: [hipX, hipY - rise, shoulderX, shoulderY - rise, width, tilt], farArm: raise(up.farArm), nearArm: raise(up.nearArm) }
+    }
     case 'four':
       return blendPose(WAVE_LEFT, WAVE_ACROSS, (1 - Math.cos(progress * TAU * 2)) / 2)
     case 'six':
@@ -366,7 +376,7 @@ function drawArm(ctx, shoulder, arm, kitColors, role) {
   }
 }
 
-function drawTorso(ctx, body, farShoulder, nearShoulder, kit, colors, backView, role) {
+function drawTorso(ctx, body, farShoulder, nearShoulder, kit, colors, backView, role, shirtNumber) {
   const [x, y, shoulderX, shoulderY, shoulderWidth] = body
   ctx.fillStyle = gradient(ctx, farShoulder[0], shoulderY, nearShoulder[0], shoulderY + 4, colors)
   ctx.beginPath()
@@ -384,8 +394,8 @@ function drawTorso(ctx, body, farShoulder, nearShoulder, kit, colors, backView, 
   if (backView) {
     ctx.font = 'bold 6px sans-serif'
     ctx.textAlign = 'center'
-    ctx.fillStyle = '#e7ebdb'
-    ctx.fillText(role === 'bowler' ? '17' : '8', shoulderX + shoulderWidth * .04, shoulderY + 10)
+    ctx.fillStyle = asHex(kit.trim)
+    ctx.fillText(shirtNumber ?? '8', shoulderX + shoulderWidth * .04, shoulderY + 10)
   } else {
     roundBox(ctx, shoulderX + 1.9, shoulderY + 4.5, 2.9, 2, .55, asHex(kit.trim))
   }
@@ -393,6 +403,16 @@ function drawTorso(ctx, body, farShoulder, nearShoulder, kit, colors, backView, 
 
 function drawHead(ctx, x, y, colors, role, backView) {
   ellipse(ctx, x, y + 4, 2.8, 4.5, '#b57854')
+  // A slightly smaller head gives the players an athletic, less cartoonish build.
+  ctx.save()
+  ctx.translate(x, y + 3)
+  ctx.scale(HEAD_SCALE, HEAD_SCALE)
+  ctx.translate(-x, -y - 3)
+  paintHead(ctx, x, y, colors, role, backView)
+  ctx.restore()
+}
+
+function paintHead(ctx, x, y, colors, role, backView) {
   if (role === 'umpire') {
     ellipse(ctx, x, y - .5, 4.2, 5, '#b77f59')
     ellipse(ctx, x, y - 3.0, 7.9, 2.35, '#151f25')
@@ -420,18 +440,18 @@ function drawHead(ctx, x, y, colors, role, backView) {
   }
 }
 
-function drawBat(ctx, handX, handY, degrees) {
+function drawBat(ctx, handX, handY, degrees, wood = BAT) {
   ctx.save()
   ctx.translate(handX, handY)
   ctx.rotate(degrees * Math.PI / 180)
   roundBox(ctx, -4.2, -1.05, 9.3, 2.1, 1, '#27383e')
-  roundBox(ctx, 3, -2.45, 19.8, 4.9, 1.4, gradient(ctx, 9, -2.5, 9, 2.5, BAT))
-  line(ctx, [6, -.8], [21.25, -.8], .5, '#f0cc90')
-  line(ctx, [8.5, 1.2], [20.75, 1.2], .5, '#a6794e')
+  roundBox(ctx, 3, -2.45, 19.8, 4.9, 1.4, gradient(ctx, 9, -2.5, 9, 2.5, wood))
+  line(ctx, [6, -.8], [21.25, -.8], .5, wood[2])
+  line(ctx, [8.5, 1.2], [20.75, 1.2], .5, wood[0])
   ctx.restore()
 }
 
-function paintFrame(ctx, x, y, rig, kit, role, name) {
+function paintFrame(ctx, x, y, rig, kit, role, name, wood, shirtNumber) {
   const { body, farArm, nearArm, farLeg, nearLeg, bat } = rig
   const [hipX, hipY, sx, sy, sw, tilt] = body
   const reach = name === 'dive' ? Math.min(1, Math.max(0, (sx - hipX - 10) / 10)) : 0
@@ -451,57 +471,67 @@ function paintFrame(ctx, x, y, rig, kit, role, name) {
   drawLeg(ctx, [hipX - 3.5, hipY], farLeg, pads, trousers)
   drawLeg(ctx, [hipX + 3.5, hipY], nearLeg, pads, trousers, asHex(kit.trim))
   drawArm(ctx, farShoulder, farArm, colors, role)
-  drawTorso(ctx, body, farShoulder, nearShoulder, kit, colors, backView, role)
+  drawTorso(ctx, body, farShoulder, nearShoulder, kit, colors, backView, role, shirtNumber)
   drawHead(ctx, sx + (backView ? .15 : 1.25) + 7 * reach, sy - 6 + reach * 4, colors, role, backView)
-  if (role === 'batter') drawBat(ctx, nearArm[2], nearArm[3], bat[0])
+  if (role === 'batter') drawBat(ctx, nearArm[2], nearArm[3], bat[0], wood)
   drawArm(ctx, nearShoulder, nearArm, colors, role)
   ctx.restore()
 }
 
-const uniforms = [
-  ['batter', 'blue'], ['batter', 'red'], ['batter', 'white'],
-  ['bowler', 'fielding'], ['keeper', 'fielding'], ['fielder', 'fielding'], ['umpire', 'red'],
-]
+// Sheets are painted at 2x on capable devices so players stay crisp when the camera moves in.
+export const SPRITE_RESOLUTION = { High: 2, Low: 1 }
 
-function* bakeFrames(textures) {
-  for (const [role, kit] of uniforms) {
-    const poses = ACTOR_POSES[role]
-    const texture = textures.createCanvas(role + '-' + kit, FRAME_COUNT * FRAME_WIDTH, poses.length * FRAME_HEIGHT)
-    const context = texture.getContext()
-    for (let row = 0; row < poses.length; row++) {
-      const name = poses[row]
-      for (let frame = 0; frame < FRAME_COUNT; frame++) {
-        const x = frame * FRAME_WIDTH
-        const y = row * FRAME_HEIGHT
-        const phase = frame / (LOOPS.has(name) ? FRAME_COUNT : FRAME_COUNT - 1)
-        paintFrame(context, x, y, getPose(name, phase, role), KITS[kit], role, name)
-        texture.addFrame(row * FRAME_COUNT + frame, x, y, FRAME_WIDTH, FRAME_HEIGHT)
-        yield
-      }
+function* bakeSheet(textures, { key, role, kit, wood, number }, resolution) {
+  const poses = ACTOR_POSES[role]
+  const texture = textures.createCanvas(key, FRAME_COUNT * FRAME_WIDTH * resolution, poses.length * FRAME_HEIGHT * resolution)
+  texture.resolution = resolution
+  const context = texture.getContext()
+  context.scale(resolution, resolution)
+  for (let row = 0; row < poses.length; row++) {
+    const name = poses[row]
+    for (let frame = 0; frame < FRAME_COUNT; frame++) {
+      const x = frame * FRAME_WIDTH
+      const y = row * FRAME_HEIGHT
+      const phase = frame / (LOOPS.has(name) ? FRAME_COUNT : FRAME_COUNT - 1)
+      context.save()
+      context.beginPath()
+      context.rect(x, y, FRAME_WIDTH, FRAME_HEIGHT)
+      context.clip()
+      paintFrame(context, x, y, getPose(name, phase, role), kit, role, name, wood, number)
+      context.restore()
+      texture.addFrame(row * FRAME_COUNT + frame, x * resolution, y * resolution, FRAME_WIDTH * resolution, FRAME_HEIGHT * resolution)
+      yield
     }
   }
 }
 
-export async function preloadActors(textures, onProgress, signal) {
-  const total = uniforms.reduce((n, [role]) => n + ACTOR_POSES[role].length * FRAME_COUNT, 0)
+// sheets: [{ key, role, kit, wood?, number? }]. Sheets already painted are kept.
+export async function bakeKits(textures, sheets, quality, onProgress = () => {}, signal) {
+  const resolution = SPRITE_RESOLUTION[quality] ?? 2
+  const missing = sheets.filter(sheet => textures.get(sheet.key)?.resolution !== resolution)
+  const total = missing.reduce((n, sheet) => n + ACTOR_POSES[sheet.role].length * FRAME_COUNT, 0)
   let painted = 0
   let start = performance.now()
-  for (const _ of bakeFrames(textures)) {
-    painted++
-    if (performance.now() - start < 6) continue
-    onProgress(painted / total)
-    await new Promise(resolve => setTimeout(resolve, 0))
-    signal.throwIfAborted()
-    start = performance.now()
+  for (const sheet of missing) {
+    for (const _ of bakeSheet(textures, sheet, resolution)) {
+      painted++
+      if (performance.now() - start < 7) continue
+      onProgress(painted / total)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      signal?.throwIfAborted()
+      start = performance.now()
+    }
   }
   onProgress(1)
 }
 
 export class CricketActor {
-  constructor(scene, { x, y, scale = 1, kit = 'blue', role = 'batter', facing = 1 }) {
+  constructor(scene, { x, y, scale = 1, sheet, role = 'batter', facing = 1, kit, wood }) {
     this.poses = ACTOR_POSES[role]
-    const texture = role + '-' + kit
-    this.sprite = scene.add.image(x, y, texture, 0)
+    this.role = role
+    this.scene = scene
+    // A lit 3D model when the renderer offers one, otherwise the painted sprite sheet.
+    this.sprite = (scene.add.figure?.(x, y, { role, kit, wood }) ?? scene.add.image(x, y, sheet, 0))
       .setOrigin(.5, GROUND_Y / FRAME_HEIGHT)
       .setScale(scale)
     this.setPosition(x, y).setPose('idle', 0, facing)
@@ -511,7 +541,8 @@ export class CricketActor {
   get y() { return this.sprite.y }
 
   setPosition(x, y) {
-    this.sprite.setPosition(x, y).setDepth(20 + y / 1000)
+    // Players lower on the screen are nearer the camera and drawn in front.
+    this.sprite.setPosition(x, y).setDepth(20 + (this.scene.screenY?.(y) ?? y) / 1000)
     return this
   }
 
@@ -535,6 +566,7 @@ export class CricketActor {
       this.sprite.setFrame(frameId)
       this.frameId = frameId
     }
+    this.sprite.setPhase?.(name, LOOPS.has(name) ? phase - Math.floor(phase) : Math.max(0, Math.min(1, phase)))
     this.facing = facing < 0 ? -1 : 1
     this.sprite.setFlipX(this.facing < 0)
     return this
